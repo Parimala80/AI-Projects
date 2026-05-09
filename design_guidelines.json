@@ -1,0 +1,98 @@
+{
+  "theme": "LIGHT",
+  "archetype": "4 (Swiss & High-Contrast)",
+  "vibe": "Authority, Clarity, Truth, Objective, Functional",
+  "colors": {
+    "background": {
+      "base": "#FFFFFF",
+      "surface": "#F4F4F6",
+      "surface_hover": "#EAEAED"
+    },
+    "text": {
+      "primary": "#0A0A0C",
+      "secondary": "#4B4B52",
+      "disabled": "#A0A0A5",
+      "inverse": "#FFFFFF"
+    },
+    "brand": {
+      "primary": "#0A0A0C",
+      "primary_hover": "#222222",
+      "accent_blue": "#002FA7",
+      "accent_red": "#FF2400",
+      "accent_yellow": "#FFD700"
+    },
+    "ocr_states": {
+      "high_confidence": "#008A00",
+      "low_confidence": "#FFD700",
+      "error": "#FF2400",
+      "highlight_box": "rgba(0, 47, 167, 0.15)"
+    }
+  },
+  "typography": {
+    "fonts": {
+      "heading": "Cabinet Grotesk, sans-serif",
+      "body": "IBM Plex Sans, sans-serif",
+      "mono": "IBM Plex Mono, monospace"
+    },
+    "hierarchy": {
+      "h1": "text-4xl sm:text-5xl tracking-tighter font-black",
+      "h2": "text-2xl sm:text-3xl tracking-tight font-bold",
+      "h3": "text-xl sm:text-2xl tracking-tight font-bold",
+      "h4": "text-lg sm:text-xl font-semibold",
+      "body": "text-base leading-relaxed",
+      "label": "text-xs tracking-[0.2em] uppercase font-bold text-[#4B4B52]",
+      "data_value": "text-base font-mono"
+    }
+  },
+  "layout_and_spacing": {
+    "philosophy": "F-Pattern Hierarchy, Dense 'Control Room' grid for dashboards, Dual-pane for side-by-side OCR review.",
+    "spacing_scale": "p-1, p-2, p-4, p-6, p-8, p-12, p-16",
+    "dashboard_grid": "grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4 or gap-6. Every pixel utilized. h-full on children.",
+    "borders": "1px crisp borders, border-[#0A0A0C]/10. Remove soft shadows.",
+    "radii": "Max 4px rounded (rounded-sm) for a rigid, brutalist tech feel.",
+    "surfaces": "Grid Borders strategy. Expose the skeleton. border-collapse style layout for data tables."
+  },
+  "components": {
+    "buttons": "Square or slightly rounded (rounded-sm). Dark background (#0A0A0C) with white text. High contrast focus rings (ring-2 ring-[#002FA7] ring-offset-2).",
+    "cards": "Flat background (#FFFFFF), 1px subtle border (#0A0A0C/10), no shadow. Hover: slight border color darken, no translation.",
+    "side_by_side_viewer": "Dual-pane layout. Left: Fixed image scan with SVG bounding boxes overlay (green/yellow/red). Right: Resizable structured data form (Shadcn Input/Select) using IBM Plex Mono.",
+    "tables": "Dense. border-collapse. Text aligned left. Status indicators (green/red dots) instead of full badges.",
+    "navigation": "Sticky left sidebar (collapsible) or rigid top header with solid background (#FFFFFF) and bottom border. Active states marked with heavy 2px left border."
+  },
+  "interaction_and_motion": {
+    "hover": "Explicit text and background changes. E.g., hover:bg-[#F4F4F6] hover:text-[#0A0A0C].",
+    "focus": "High contrast ring. focus:ring-2 focus:ring-[#002FA7].",
+    "transitions": "Fast, precise. transition: all 0.15s ease-in-out. Disable all bouncy spring animations.",
+    "accessibility": "Minimum 4.5:1 contrast. aria-hidden on decorative elements."
+  },
+  "icons_and_assets": {
+    "icon_library": "@phosphor-icons/react (Weight: Regular or Bold for crispness in dense data UI).",
+    "install_command": "yarn add @phosphor-icons/react"
+  },
+  "media": {
+    "image_urls": [
+      {
+        "category": "logo_tenant_1",
+        "description": "Simple flat corporate logo for Tenant A",
+        "url": "https://images.unsplash.com/photo-1766999222149-4bc1cbf591a8?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2MDV8MHwxfHNlYXJjaHwyfHxjb3Jwb3JhdGUlMjBsb2dvJTIwc2ltcGxlJTIwZmxhdHxlbnwwfHx8fDE3NzgzMTMyODB8MA&ixlib=rb-4.1.0&q=85"
+      },
+      {
+        "category": "logo_tenant_2",
+        "description": "Simple flat corporate logo for Tenant B",
+        "url": "https://images.unsplash.com/photo-1775513143262-bccd605c5dd8?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2MDV8MHwxfHNlYXJjaHwzfHxjb3Jwb3JhdGUlMjBsb2dvJTIwc2ltcGxlJTIwZmxhdHxlbnwwfHx8fDE3NzgzMTMyODB8MA&ixlib=rb-4.1.0&q=85"
+      },
+      {
+        "category": "logo_tenant_3",
+        "description": "Simple flat corporate logo for Tenant C",
+        "url": "https://images.unsplash.com/photo-1768433545625-3ae6793a0e22?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2MDV8MHwxfHNlYXJjaHwxfHxjb3Jwb3JhdGUlMjBsb2dvJTIwc2ltcGxlJTIwZmxhdHxlbnwwfHx8fDE3NzgzMTMyODB8MA&ixlib=rb-4.1.0&q=85"
+      }
+    ]
+  },
+  "development_rules": {
+    "testing": "All interactive and key informational elements MUST include a data-testid attribute in kebab-case based on role (e.g., data-testid='upload-document-button', data-testid='ocr-confidence-score').",
+    "shadcn": "Heavily customize shadcn components to remove 'soft' styling. Strip large border radii and soft shadows. Use crisp borders.",
+    "html": "For raw layout, use standard HTML tags (div, section) styled with Tailwind over pre-packaged layout components.",
+    "files": "Use .js or .jsx files, NOT .tsx. Provide the implementation in standard JavaScript."
+  },
+  "instructions_to_main_agent": "Implement a Light Theme, Swiss Brutalist UI. Build a dashboard with 'Control Room Grid' (Mode B). Create a dual-pane side-by-side OCR review UI with fixed left scan and resizable right data fields. Implement drag-and-drop upload. Strictly adhere to text-color contrast, minimal rounded corners (max 4px), and 1px crisp grid borders. Do NOT use soft shadows. Do NOT use generic inter font. Use data-testid on every interactive element."
+}
