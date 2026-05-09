@@ -264,9 +264,9 @@ async def log_audit(tenant_id: str, user_id: str, action: str, resource_type: st
 @api.post("/auth/register")
 async def register(payload: RegisterIn, response: Response):
     email = payload.email.lower().strip()
-    role = (payload.role or "operations").lower()
-    if role not in ROLES:
-        raise HTTPException(400, "Invalid role")
+    # Public registration ALWAYS creates non-admin user. Admins are elevated via /users by an existing admin.
+    requested_role = (payload.role or "operations").lower()
+    role = requested_role if requested_role in (ROLES - {"admin"}) else "operations"
     if await db.users.find_one({"email": email}):
         raise HTTPException(400, "Email already registered")
     # If tenant_name provided, create new tenant; otherwise default tenant

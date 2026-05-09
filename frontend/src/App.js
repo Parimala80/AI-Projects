@@ -48,7 +48,7 @@ function App() {
             <Route path="/vendors" element={<Shell><Vendors /></Shell>} />
             <Route path="/users" element={<Shell roles={["admin", "manager"]}><Users /></Shell>} />
             <Route path="/audit-logs" element={<Shell roles={["admin", "manager"]}><AuditLogs /></Shell>} />
-            <Route path="/api-docs" element={<Shell><ApiDocs /></Shell>} />
+            <Route path="/developers" element={<Shell><ApiDocs /></Shell>} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </BrowserRouter>

@@ -12,7 +12,7 @@ const NAV = [
   { to: "/vendors", label: "Vendors", icon: Storefront, roles: null },
   { to: "/users", label: "Users", icon: Users, roles: ["admin", "manager"] },
   { to: "/audit-logs", label: "Audit Logs", icon: ListChecks, roles: ["admin", "manager"] },
-  { to: "/api-docs", label: "API Reference", icon: BookOpen, roles: null },
+  { to: "/developers", label: "API Reference", icon: BookOpen, roles: null },
 ];
 
 export default function Layout({ children }) {

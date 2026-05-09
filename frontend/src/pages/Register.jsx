@@ -4,7 +4,7 @@ import { useAuth } from "../contexts/AuthContext";
 import { formatApiErrorDetail } from "../lib/api";
 import { ArrowRight, Cube } from "@phosphor-icons/react";
 
-const ROLES = ["operations", "finance", "warehouse", "manager", "admin"];
+const ROLES = ["operations", "finance", "warehouse", "manager"];
 
 export default function Register() {
   const [form, setForm] = useState({ email: "", password: "", name: "", role: "operations", tenant_name: "" });
