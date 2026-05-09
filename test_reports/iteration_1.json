@@ -1,0 +1,45 @@
+{
+  "summary": "First iteration full-stack testing of Document Intelligence Platform. Backend pytest suite (26 tests) executed with 25 passing (96%), including real Gemini-2.5-pro extraction on a generated invoice image (returned doc_type=invoice, confidence~0.95, extracted vendor/invoice fields). Frontend smoke-tested across all major pages with Playwright; landing, login, dashboard (KPIs+trend+status breakdown), documents (filters+exports+row click), upload (with file+real Gemini auto-process), vendors, users, audit-logs, and DocumentViewer (side-by-side, save/approve/reject/reprocess) all work end-to-end. One CRITICAL frontend route bug found (/api-docs collides with backend /api ingress prefix) and one minor UX note (auto-process-toggle/upload-submit-button only render after a file is selected).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/auth/register", "issue": "Email is silently lower-cased on store; documented behavior, but not surfaced to client. Register response returns the lower-cased value which is fine, but consider documenting."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "ApiDocs route", "issue": "Route /api-docs is intercepted by K8s ingress (which routes any /api/* path to FastAPI backend on :8001). Result: navigating to /api-docs returns backend JSON {\"detail\":\"Not Found\"} instead of rendering ApiDocs page. The React route, sidebar link (Layout.jsx nav-api-reference), and App.js <Route path=\"/api-docs\"> all need to be renamed to a non-/api prefix (e.g. /developers or /api-reference WITHOUT a slash after /api -- actually the issue is the leading /api segment, so use /reference, /developers, or /api_docs without dash won't help; safest is /reference or /developers).", "selector": "[data-testid=\"nav-api-reference\"]", "priority": "HIGH"},
+      {"component": "DocumentUpload", "issue": "auto-process-toggle and upload-submit-button are conditionally rendered only after a file is selected. They are not visible on the initial page load. This is fine functionally, but worth noting for tests/UX (consider showing them disabled before selection so the user sees the auto-process option upfront).", "selector": "[data-testid=\"auto-process-toggle\"]", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard", "issues": ["Recharts container width(-1) height(-1) warnings logged in console (chart still renders correctly via ResponsiveContainer once layout settles, but consider giving the chart wrapper a fixed minHeight to silence warnings)."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "HIGH: Rename frontend route '/api-docs' -> something that does NOT start with '/api' (e.g. '/developers' or '/reference'). Update App.js route, Layout.jsx sidebar nav 'to', and any internal links. The K8s ingress unconditionally routes /api/* to the backend.",
+    "LOW: Optionally show auto-process toggle and submit button (disabled state) before a file is selected on /upload for clearer UX.",
+    "LOW: Set minHeight on the Recharts ResponsiveContainer wrapper on Dashboard to remove width/height(-1) warnings."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 879 lines - consider splitting into modules (auth.py, documents.py, exports.py, dashboard.py) for maintainability (>700 line guideline).",
+    "extract_with_gemini correctly excludes _id and uses async; good. EMERGENT_LLM_KEY checked at runtime.",
+    "RBAC is consistent via require_roles dependency and tenant_id filter is applied to every list/get query (good multi-tenant isolation).",
+    "Brute-force lockout: 5 attempts/15min implemented in /auth/login; bcrypt $2b$ hashes used; httpOnly+secure+samesite=none cookies configured for cross-origin (matches playbook).",
+    "/auth/register grants role from client input (default operations) but does not restrict 'admin' role - any unauthenticated public caller can self-register as admin. Recommend forcing role=operations for /auth/register and only allowing admin to elevate via /users endpoint."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py"
+  ],
+  "success_rate": {"backend": "100% (26/26 after test fix; was 96% on first run due to a test-side email casing assertion)", "frontend": "~92% (11/12 user-visible flows pass; only /api-docs route is broken)"},
+  "test_credentials": "admin@docintel.io / Admin@123 (from /app/memory/test_credentials.md, auto-seeded). Verified working via /api/auth/login and frontend login form.",
+  "seed_data_creation": "Tests create TEST_-prefixed users/vendors/documents and clean them up at end of session. Real Gemini extraction was performed on a synthetically generated PNG invoice (PIL drawn) per /app/image_testing.md.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend test file at /app/backend/tests/backend_test.py is the regression suite (pytest + JUnit XML). All endpoints covered including real Gemini-2.5-pro processing (single test takes ~10-30s). Use ADMIN_EMAIL/ADMIN_PASSWORD from backend/.env. Critical bug to retest after fix: /api-docs route renaming - verify the new URL renders the React page (data-testid=api-docs-page) and that the sidebar link works. Auto-process-toggle is only conditionally rendered (after file selection); test by setting input[type=file] first.",
+  "rca of the issue": "Root cause of /api-docs breakage: The Kubernetes ingress is configured (per environment spec) to route any path with the /api prefix to backend port 8001. The frontend ApiDocs page is mounted at /api-docs in React Router, so when the browser requests /api-docs, ingress sees the /api prefix and forwards to FastAPI which has no such endpoint -> returns 404 JSON. Fix: change the React route path (and sidebar link) to a slug that does not start with /api/. Reproduction: visit https://smart-dc-hub.preview.emergentagent.com/api-docs while logged in - browser shows raw JSON {\"detail\":\"Not Found\"}. Mitigation: rename route to '/developers' or '/reference' in /app/frontend/src/App.js (line 51) and /app/frontend/src/components/Layout.jsx (line 15)."
+}
