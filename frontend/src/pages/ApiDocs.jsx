@@ -34,17 +34,21 @@ const GROUPS = [
     items: [
       ["GET", "/api/tenants/me", "Get tenant info"],
       ["PUT", "/api/tenants/me", "Update tenant (admin)"],
+      ["GET", "/api/tenants/me/ocr-settings", "Get OCR + Co-Pilot config"],
+      ["PUT", "/api/tenants/me/ocr-settings", "Update OCR + Co-Pilot (admin)"],
+      ["POST", "/api/tenants/me/ocr-settings/test", "Ping olmOCR endpoint (admin)"],
       ["GET", "/api/users", "List users (admin/manager)"],
       ["POST", "/api/users", "Create user (admin)"],
       ["DELETE", "/api/users/{id}", "Delete user (admin)"],
     ],
   },
   {
-    title: "Vendors & Audit",
+    title: "Vendors, Co-Pilot & Audit",
     items: [
       ["GET", "/api/vendors", "List vendors"],
       ["POST", "/api/vendors", "Add vendor"],
       ["DELETE", "/api/vendors/{id}", "Remove vendor"],
+      ["POST", "/api/documents/{id}/copilot/chat", "Chat with AI Co-Pilot"],
       ["GET", "/api/audit-logs", "Audit trail (admin/manager)"],
       ["GET", "/api/dashboard/stats", "Dashboard analytics"],
     ],

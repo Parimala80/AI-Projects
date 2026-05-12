@@ -15,6 +15,7 @@ from typing import List, Optional, Dict, Any
 
 import bcrypt
 import jwt
+import httpx
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, UploadFile, File, Form, Query
 from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
@@ -122,6 +123,17 @@ class TenantIn(BaseModel):
     name: str
     gstin: Optional[str] = None
 
+class OcrSettingsIn(BaseModel):
+    default_engine: Optional[str] = "gemini"        # gemini | olmocr | auto
+    olmocr_endpoint: Optional[str] = ""             # e.g. http://gpu-host:8000
+    olmocr_api_key: Optional[str] = ""
+    olmocr_model: Optional[str] = "allenai/olmOCR-2-7B-1025-FP8"
+    olmocr_timeout: Optional[int] = 120
+    auto_fallback_threshold: Optional[float] = 0.5  # if confidence < this in auto mode, fall back
+    copilot_enabled: Optional[bool] = True
+    copilot_model_provider: Optional[str] = "gemini"  # gemini | openai | anthropic
+    copilot_model_name: Optional[str] = "gemini-2.5-pro"
+
 class VendorIn(BaseModel):
     name: str
     gstin: Optional[str] = None
@@ -133,6 +145,13 @@ class DocumentUpdateIn(BaseModel):
     doc_type: Optional[str] = None
     status: Optional[str] = None
     notes: Optional[str] = None
+
+class CopilotChatIn(BaseModel):
+    message: str
+    history: Optional[List[Dict[str, str]]] = []  # [{role: user|assistant, content: ...}]
+
+class UploadOptionsIn(BaseModel):
+    engine_override: Optional[str] = None  # gemini | olmocr | auto
 
 # ----------------------------- VALIDATION -----------------------------
 GST_REGEX = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$")
@@ -237,10 +256,167 @@ async def extract_with_gemini(image_b64: str, mime_type: str) -> Dict[str, Any]:
         except json.JSONDecodeError:
             m = re.search(r"\{.*\}", text, re.DOTALL)
             data = json.loads(m.group(0)) if m else {"raw_text": text, "doc_type": "other", "confidence": 0.3}
+        data["_engine"] = "gemini"
         return data
     except Exception as e:
         logger.exception("gemini extraction failed")
-        return {"doc_type": "other", "confidence": 0.0, "raw_text": "", "error": str(e)}
+        return {"doc_type": "other", "confidence": 0.0, "raw_text": "", "error": str(e), "_engine": "gemini"}
+
+
+def _parse_extraction_text(text: str) -> Dict[str, Any]:
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?", "", text).rstrip("`").rstrip("```").strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except Exception:
+                pass
+    return {"raw_text": text, "doc_type": "other", "confidence": 0.3}
+
+
+async def extract_with_olmocr(image_b64: str, mime_type: str, settings: Dict[str, Any]) -> Dict[str, Any]:
+    """Call a user-hosted olmOCR endpoint (OpenAI-compatible, e.g. vLLM-served)."""
+    endpoint = (settings.get("olmocr_endpoint") or "").strip().rstrip("/")
+    if not endpoint:
+        return {"doc_type": "other", "confidence": 0.0, "raw_text": "",
+                "error": "olmOCR endpoint not configured", "_engine": "olmocr"}
+    api_key = settings.get("olmocr_api_key") or ""
+    model = settings.get("olmocr_model") or "allenai/olmOCR-2-7B-1025-FP8"
+    timeout = int(settings.get("olmocr_timeout") or 120)
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    payload = {
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": EXTRACTION_PROMPT},
+                {"type": "image_url",
+                 "image_url": {"url": f"data:{mime_type};base64,{image_b64}"}},
+            ],
+        }],
+        "max_tokens": 4096,
+        "temperature": 0.0,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.post(f"{endpoint}/v1/chat/completions", json=payload, headers=headers)
+            r.raise_for_status()
+            result = r.json()
+        text = result["choices"][0]["message"]["content"]
+        data = _parse_extraction_text(text)
+        data["_engine"] = "olmocr"
+        data["_engine_model"] = model
+        return data
+    except httpx.HTTPStatusError as e:
+        msg = f"olmOCR HTTP {e.response.status_code}: {e.response.text[:200]}"
+        logger.warning(msg)
+        return {"doc_type": "other", "confidence": 0.0, "raw_text": "", "error": msg, "_engine": "olmocr"}
+    except Exception as e:
+        logger.exception("olmocr extraction failed")
+        return {"doc_type": "other", "confidence": 0.0, "raw_text": "", "error": str(e), "_engine": "olmocr"}
+
+
+async def extract_with_engine(tenant_id: str, image_b64: str, mime_type: str,
+                              engine_override: Optional[str] = None) -> Dict[str, Any]:
+    """Route extraction through tenant-configured engine with optional auto-fallback."""
+    tenant = await db.tenants.find_one({"id": tenant_id}, {"_id": 0}) or {}
+    settings = tenant.get("ocr_settings") or {}
+    engine = (engine_override or settings.get("default_engine") or "gemini").lower()
+    threshold = float(settings.get("auto_fallback_threshold") or 0.5)
+    attempts: List[Dict[str, Any]] = []
+
+    if engine == "olmocr":
+        data = await extract_with_olmocr(image_b64, mime_type, settings)
+        attempts.append({"engine": "olmocr", "ok": not data.get("error"),
+                         "confidence": data.get("confidence", 0)})
+        data["_attempts"] = attempts
+        return data
+
+    if engine == "gemini":
+        data = await extract_with_gemini(image_b64, mime_type)
+        attempts.append({"engine": "gemini", "ok": not data.get("error"),
+                         "confidence": data.get("confidence", 0)})
+        data["_attempts"] = attempts
+        return data
+
+    # auto: try olmocr first if configured, fall back to gemini on failure or low confidence
+    if settings.get("olmocr_endpoint"):
+        primary = await extract_with_olmocr(image_b64, mime_type, settings)
+        ok = not primary.get("error") and float(primary.get("confidence") or 0) >= threshold
+        attempts.append({"engine": "olmocr", "ok": ok,
+                         "confidence": primary.get("confidence", 0),
+                         "error": primary.get("error")})
+        if ok:
+            primary["_attempts"] = attempts
+            return primary
+    fallback = await extract_with_gemini(image_b64, mime_type)
+    attempts.append({"engine": "gemini", "ok": not fallback.get("error"),
+                     "confidence": fallback.get("confidence", 0)})
+    fallback["_attempts"] = attempts
+    fallback["_engine"] = "gemini"  # final engine that produced the data
+    return fallback
+
+
+# ----------------------------- COPILOT CHAT -----------------------------
+COPILOT_SYSTEM = """You are DocIntel Co-Pilot — an AI assistant embedded in an enterprise document
+intelligence platform. The user is reviewing an already-extracted business document (invoice, DC,
+GRN, etc.). You will be given:
+- the source document image
+- the currently extracted structured fields (JSON)
+- any pending validation errors
+- the user's question or instruction
+
+Be concise, accurate, and helpful. When the user asks for a correction, return exactly what to change
+(field name + new value). When asked to explain a discrepancy, cite specific values. Avoid hallucinating
+data not visible in the document. Reply in plain text or short markdown."""
+
+async def copilot_reply(tenant_id: str, doc: dict, file_b64: str, mime: str,
+                        user_msg: str, history: List[Dict[str, str]]) -> str:
+    tenant = await db.tenants.find_one({"id": tenant_id}, {"_id": 0}) or {}
+    settings = tenant.get("ocr_settings") or {}
+    if settings.get("copilot_enabled") is False:
+        return "Co-Pilot is disabled for this tenant. Ask your admin to enable it in Settings."
+    provider = settings.get("copilot_model_provider") or "gemini"
+    model = settings.get("copilot_model_name") or "gemini-2.5-pro"
+
+    context = (
+        f"Document filename: {doc.get('filename')}\n"
+        f"Detected type: {doc.get('doc_type')}\n"
+        f"Confidence: {doc.get('confidence')}\n"
+        f"Engine used: {(doc.get('extracted_data') or {}).get('_engine')}\n"
+        f"Extracted fields (JSON):\n{json.dumps(doc.get('extracted_data') or {}, indent=2, default=str)}\n\n"
+        f"Validation errors:\n{json.dumps(doc.get('validation_errors') or [], indent=2)}\n"
+    )
+
+    convo_text = ""
+    for m in (history or [])[-8:]:
+        role = m.get("role", "user").upper()
+        convo_text += f"\n[{role}]: {m.get('content', '')}\n"
+
+    full_text = f"{context}\n\n--- Conversation so far ---{convo_text}\n[USER]: {user_msg}"
+
+    try:
+        chat = LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=f"copilot-{doc.get('id')}-{uuid.uuid4()}",
+            system_message=COPILOT_SYSTEM,
+        ).with_model(provider, model)
+        # attach the document image so co-pilot can actually see it
+        attachments = []
+        if mime.startswith("image/") and file_b64:
+            attachments.append(ImageContent(image_base64=file_b64))
+        msg = UserMessage(text=full_text, file_contents=attachments)
+        return (await chat.send_message(msg)).strip()
+    except Exception as e:
+        logger.exception("copilot failed")
+        return f"Co-Pilot error: {e}"
 
 # ----------------------------- APP / ROUTER -----------------------------
 app = FastAPI(title="Document Intelligence Platform API", version="1.0.0",
@@ -375,6 +551,64 @@ async def update_my_tenant(payload: TenantIn, user: dict = Depends(require_roles
                                 {"$set": {"name": payload.name, "gstin": payload.gstin}})
     return await db.tenants.find_one({"id": user["tenant_id"]}, {"_id": 0})
 
+@api.get("/tenants/me/ocr-settings")
+async def get_ocr_settings(user: dict = Depends(get_current_user)):
+    t = await db.tenants.find_one({"id": user["tenant_id"]}, {"_id": 0}) or {}
+    s = t.get("ocr_settings") or {}
+    # never leak the api key back in full
+    if s.get("olmocr_api_key"):
+        s = {**s, "olmocr_api_key": "***" + s["olmocr_api_key"][-4:]}
+    defaults = {
+        "default_engine": "gemini",
+        "olmocr_endpoint": "",
+        "olmocr_api_key": "",
+        "olmocr_model": "allenai/olmOCR-2-7B-1025-FP8",
+        "olmocr_timeout": 120,
+        "auto_fallback_threshold": 0.5,
+        "copilot_enabled": True,
+        "copilot_model_provider": "gemini",
+        "copilot_model_name": "gemini-2.5-pro",
+    }
+    return {**defaults, **s}
+
+@api.put("/tenants/me/ocr-settings")
+async def update_ocr_settings(payload: OcrSettingsIn, user: dict = Depends(require_roles("admin"))):
+    incoming = {k: v for k, v in payload.model_dump().items() if v is not None}
+    engine = (incoming.get("default_engine") or "").lower()
+    if engine and engine not in ("gemini", "olmocr", "auto"):
+        raise HTTPException(400, "default_engine must be one of: gemini, olmocr, auto")
+    # if api_key starts with *** treat as masked placeholder and don't overwrite
+    if str(incoming.get("olmocr_api_key", "")).startswith("***"):
+        incoming.pop("olmocr_api_key", None)
+    existing = (await db.tenants.find_one({"id": user["tenant_id"]}, {"_id": 0}) or {}).get("ocr_settings") or {}
+    merged = {**existing, **incoming}
+    await db.tenants.update_one({"id": user["tenant_id"]}, {"$set": {"ocr_settings": merged}})
+    await log_audit(user["tenant_id"], user["id"], "update_ocr_settings", "tenant",
+                    user["tenant_id"], {"engine": merged.get("default_engine")})
+    masked = dict(merged)
+    if masked.get("olmocr_api_key"):
+        masked["olmocr_api_key"] = "***" + masked["olmocr_api_key"][-4:]
+    return masked
+
+@api.post("/tenants/me/ocr-settings/test")
+async def test_olmocr(user: dict = Depends(require_roles("admin"))):
+    """Ping the configured olmOCR endpoint to verify connectivity (no image sent)."""
+    t = await db.tenants.find_one({"id": user["tenant_id"]}, {"_id": 0}) or {}
+    s = t.get("ocr_settings") or {}
+    endpoint = (s.get("olmocr_endpoint") or "").strip().rstrip("/")
+    if not endpoint:
+        raise HTTPException(400, "olmocr_endpoint not configured")
+    headers = {}
+    if s.get("olmocr_api_key"):
+        headers["Authorization"] = f"Bearer {s['olmocr_api_key']}"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"{endpoint}/v1/models", headers=headers)
+        return {"ok": r.status_code == 200, "status": r.status_code,
+                "body": r.text[:400]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
 @api.get("/users")
 async def list_users(user: dict = Depends(require_roles("admin", "manager"))):
     cursor = db.users.find({"tenant_id": user["tenant_id"]}, {"_id": 0, "password_hash": 0})
@@ -472,40 +706,43 @@ async def _save_document(file: UploadFile, user: dict) -> dict:
 @api.post("/documents/upload")
 async def upload_document(file: UploadFile = File(...),
                           auto_process: bool = Form(True),
+                          engine_override: Optional[str] = Form(None),
                           user: dict = Depends(get_current_user)):
     doc = await _save_document(file, user)
     if auto_process and doc["mime_type"].startswith("image/"):
-        asyncio.create_task(_process_document_async(doc["id"], user["tenant_id"]))
+        asyncio.create_task(_process_document_async(doc["id"], user["tenant_id"], engine_override))
     doc.pop("file_b64", None)
     return doc
 
 @api.post("/documents/upload-bulk")
 async def upload_bulk(files: List[UploadFile] = File(...),
                       auto_process: bool = Form(True),
+                      engine_override: Optional[str] = Form(None),
                       user: dict = Depends(get_current_user)):
     saved = []
     for f in files:
         try:
             d = await _save_document(f, user)
             if auto_process and d["mime_type"].startswith("image/"):
-                asyncio.create_task(_process_document_async(d["id"], user["tenant_id"]))
+                asyncio.create_task(_process_document_async(d["id"], user["tenant_id"], engine_override))
             d.pop("file_b64", None)
             saved.append(d)
         except HTTPException as e:
             saved.append({"filename": f.filename, "error": e.detail})
     return {"uploaded": len(saved), "documents": saved}
 
-async def _process_document_async(doc_id: str, tenant_id: str):
+async def _process_document_async(doc_id: str, tenant_id: str, engine_override: Optional[str] = None):
     doc = await db.documents.find_one({"id": doc_id, "tenant_id": tenant_id})
     if not doc:
         return
     await db.documents.update_one({"id": doc_id}, {"$set": {"status": "processing"}})
     try:
         if doc["mime_type"].startswith("image/"):
-            data = await extract_with_gemini(doc["file_b64"], doc["mime_type"])
+            data = await extract_with_engine(tenant_id, doc["file_b64"], doc["mime_type"], engine_override)
         else:
             data = {"doc_type": "other", "confidence": 0.0, "raw_text": "",
-                    "error": "Only image processing supported in this MVP"}
+                    "error": "Only image processing supported in this MVP",
+                    "_engine": "none", "_attempts": []}
         confidence = float(data.get("confidence") or 0.0)
         doc_type = data.get("doc_type") or "other"
         errors = await run_validations(tenant_id, doc_id, data)
@@ -516,6 +753,8 @@ async def _process_document_async(doc_id: str, tenant_id: str):
             "doc_type": doc_type,
             "status": status,
             "validation_errors": errors,
+            "extraction_engine": data.get("_engine"),
+            "extraction_attempts": data.get("_attempts") or [],
             "updated_at": datetime.now(timezone.utc).isoformat()
         }})
     except Exception as e:
@@ -525,12 +764,15 @@ async def _process_document_async(doc_id: str, tenant_id: str):
         }})
 
 @api.post("/documents/{doc_id}/process")
-async def process_document(doc_id: str, user: dict = Depends(get_current_user)):
+async def process_document(doc_id: str,
+                           engine_override: Optional[str] = Query(None),
+                           user: dict = Depends(get_current_user)):
     doc = await db.documents.find_one({"id": doc_id, "tenant_id": user["tenant_id"]})
     if not doc:
         raise HTTPException(404, "Not found")
-    await _process_document_async(doc_id, user["tenant_id"])
-    await log_audit(user["tenant_id"], user["id"], "process_document", "document", doc_id)
+    await _process_document_async(doc_id, user["tenant_id"], engine_override)
+    await log_audit(user["tenant_id"], user["id"], "process_document", "document", doc_id,
+                    {"engine": engine_override or "tenant_default"})
     updated = await db.documents.find_one({"id": doc_id}, {"_id": 0, "file_b64": 0})
     return updated
 
@@ -628,6 +870,24 @@ async def delete_document(doc_id: str, user: dict = Depends(require_roles("admin
         raise HTTPException(404, "Not found")
     await log_audit(user["tenant_id"], user["id"], "delete_document", "document", doc_id)
     return {"ok": True}
+
+# ----------------------------- COPILOT -----------------------------
+@api.post("/documents/{doc_id}/copilot/chat")
+async def copilot_chat(doc_id: str, payload: CopilotChatIn, user: dict = Depends(get_current_user)):
+    doc = await db.documents.find_one({"id": doc_id, "tenant_id": user["tenant_id"]})
+    if not doc:
+        raise HTTPException(404, "Not found")
+    reply = await copilot_reply(
+        tenant_id=user["tenant_id"],
+        doc=doc,
+        file_b64=doc.get("file_b64", ""),
+        mime=doc.get("mime_type", ""),
+        user_msg=payload.message,
+        history=payload.history or [],
+    )
+    await log_audit(user["tenant_id"], user["id"], "copilot_chat", "document", doc_id,
+                    {"chars": len(payload.message)})
+    return {"reply": reply}
 
 # ----------------------------- EXPORTS -----------------------------
 def _flatten_doc(doc: dict) -> dict:

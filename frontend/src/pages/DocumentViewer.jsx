@@ -3,9 +3,10 @@ import { useNavigate, useParams, Link } from "react-router-dom";
 import { api, API } from "../lib/api";
 import { PageHeader } from "../components/Layout";
 import { StatusPill, ConfidenceBadge } from "../components/Pills";
-import { ArrowLeft, ArrowsClockwise, CheckCircle, XCircle, FloppyDisk, DownloadSimple, MagnifyingGlassPlus, MagnifyingGlassMinus } from "@phosphor-icons/react";
+import { ArrowLeft, ArrowsClockwise, CheckCircle, XCircle, FloppyDisk, DownloadSimple, MagnifyingGlassPlus, MagnifyingGlassMinus, CpuIcon, Lightning } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import { useAuth } from "../contexts/AuthContext";
+import CopilotPanel from "../components/CopilotPanel";
 
 const DOC_TYPES = ["invoice", "delivery_challan", "purchase_order", "grn", "packing_slip", "eway_bill", "transport_slip", "receipt", "other", "unknown"];
 
@@ -78,15 +79,16 @@ export default function DocumentViewer() {
     } finally { setBusy(false); }
   };
 
-  const reprocess = async () => {
+  const reprocess = async (engine) => {
     setBusy(true);
     try {
-      const r = await api.post(`/documents/${id}/process`);
+      const url = engine ? `/documents/${id}/process?engine_override=${engine}` : `/documents/${id}/process`;
+      const r = await api.post(url);
       setDoc(r.data);
       setData(r.data.extracted_data || {});
       setItems(r.data.extracted_data?.line_items || []);
       setDocType(r.data.doc_type || "unknown");
-      toast.success("Re-extracted");
+      toast.success(engine ? `Re-extracted with ${engine}` : "Re-extracted");
     } catch (e) {
       toast.error("Reprocess failed");
     } finally { setBusy(false); }
@@ -130,10 +132,16 @@ export default function DocumentViewer() {
         kicker={`DOC · ${doc.id.slice(0, 8)}`}
         title={doc.filename}
         description={
-          <span className="flex items-center gap-3 mt-1">
+          <span className="flex flex-wrap items-center gap-3 mt-1">
             <StatusPill status={doc.status} />
             <ConfidenceBadge value={doc.confidence} />
             <span className="label-tag">{doc.doc_type}</span>
+            {doc.extraction_engine && (
+              <span className="status-pill" data-testid="engine-badge">
+                <Lightning size={11} weight="bold" />
+                {doc.extraction_engine}
+              </span>
+            )}
           </span>
         }
         actions={
@@ -141,9 +149,24 @@ export default function DocumentViewer() {
             <Link to="/documents" className="btn-secondary inline-flex items-center gap-2" data-testid="back-button">
               <ArrowLeft size={13} weight="bold" /> Back
             </Link>
-            <button onClick={reprocess} disabled={busy} className="btn-secondary inline-flex items-center gap-2" data-testid="reprocess-button">
-              <ArrowsClockwise size={13} weight="bold" /> Re-extract
-            </button>
+            <div className="flex items-center" data-testid="reprocess-group">
+              <button onClick={() => reprocess()} disabled={busy} className="btn-secondary inline-flex items-center gap-2 !rounded-r-none" data-testid="reprocess-button">
+                <ArrowsClockwise size={13} weight="bold" /> Re-extract
+              </button>
+              <select
+                onChange={(e) => { if (e.target.value) { reprocess(e.target.value); e.target.value = ""; } }}
+                disabled={busy}
+                defaultValue=""
+                className="btn-secondary !rounded-l-none !border-l-0 !py-2.5 !px-2 text-xs font-mono cursor-pointer"
+                data-testid="reprocess-engine-select"
+                title="Pick a specific engine"
+              >
+                <option value="">↓</option>
+                <option value="gemini">with Gemini</option>
+                <option value="olmocr">with olmOCR</option>
+                <option value="auto">auto</option>
+              </select>
+            </div>
             <a href={`${API}/documents/${id}/export?format=excel`} target="_blank" rel="noreferrer" className="btn-secondary inline-flex items-center gap-2" data-testid="export-doc-btn">
               <DownloadSimple size={13} weight="bold" /> Excel
             </a>
@@ -291,9 +314,31 @@ export default function DocumentViewer() {
                 <div className="text-sm font-mono">{doc.notes}</div>
               </div>
             )}
+
+            {doc.extraction_attempts && doc.extraction_attempts.length > 0 && (
+              <div className="mt-6 swiss-card p-4" data-testid="engine-attempts">
+                <div className="label-tag mb-2">EXTRACTION TIMELINE</div>
+                <ul className="space-y-1">
+                  {doc.extraction_attempts.map((a, i) => (
+                    <li key={i} className="text-xs font-mono flex items-center justify-between border-b border-[color:var(--border-line)] last:border-b-0 py-1.5">
+                      <span className="flex items-center gap-2">
+                        <span className={`dot ${a.ok ? "dot-green" : "dot-red"}`} />
+                        {a.engine}
+                      </span>
+                      <span className="text-[color:var(--text-secondary)]">
+                        conf: {((a.confidence || 0) * 100).toFixed(0)}%
+                        {a.error ? ` · ${String(a.error).slice(0, 60)}` : ""}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
         </div>
       </div>
+
+      <CopilotPanel doc={doc} />
     </div>
   );
 }

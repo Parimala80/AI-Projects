@@ -107,7 +107,7 @@ export default function Documents() {
         <div className="border border-[color:var(--border-line)]">
           <div className="grid grid-cols-12 px-4 py-3 label-tag border-b border-[color:var(--border-line)] bg-[color:var(--bg-surface)]">
             <div className="col-span-3">FILENAME</div>
-            <div className="col-span-2">TYPE</div>
+            <div className="col-span-2">TYPE · ENGINE</div>
             <div className="col-span-2">VENDOR</div>
             <div className="col-span-2">INVOICE / DC</div>
             <div className="col-span-1">CONFIDENCE</div>
@@ -130,7 +130,14 @@ export default function Documents() {
                 data-testid={`doc-row-${d.id}`}
               >
                 <div className="col-span-3 truncate text-sm font-mono">{d.filename}</div>
-                <div className="col-span-2 text-xs label-tag">{d.doc_type}</div>
+                <div className="col-span-2 text-xs">
+                  <div className="label-tag">{d.doc_type}</div>
+                  {d.extraction_engine && (
+                    <div className="font-mono text-[10px] text-[color:var(--text-secondary)] mt-0.5">
+                      via {d.extraction_engine}
+                    </div>
+                  )}
+                </div>
                 <div className="col-span-2 truncate text-sm">{d.extracted_data?.vendor_name || "—"}</div>
                 <div className="col-span-2 truncate text-sm font-mono">{d.extracted_data?.invoice_number || d.extracted_data?.dc_number || "—"}</div>
                 <div className="col-span-1"><ConfidenceBadge value={d.confidence} /></div>

@@ -1,0 +1,47 @@
+{
+  "summary": "Iteration 2 testing of OCR engine settings (gemini|olmocr|auto + fallback), per-upload engine_override, AI Co-Pilot chat, and tenant isolation. Backend: 15/15 new tests + 26/26 regression tests pass (41/41 = 100%). Frontend: Settings page (all data-testids, save+test connection, auto engine selection), non-admin /settings forbidden screen, Layout sidebar nav-settings visibility, DocumentViewer Copilot panel (open/starters/send/receive Gemini reply/close), engine-badge, engine-attempts panel, reprocess-engine-select, Documents list 'via {engine}' badge, and Documents list integration all work. CRITICAL bug found and fixed in DocumentUpload.jsx — the page crashed with 'engineOverride is not defined' (ReferenceError) because the useState was missing. After adding `const [engineOverride, setEngineOverride] = useState('')`, the upload-engine-select dropdown renders correctly with options ['', 'gemini', 'olmocr', 'auto'].",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "DocumentUpload", "issue": "Runtime ReferenceError: 'engineOverride is not defined' — missing useState declaration broke the entire /upload page after file selection. FIXED by testing agent (added const [engineOverride, setEngineOverride] = useState('') at line 13).", "selector": "[data-testid=\"upload-engine-select\"]", "priority": "CRITICAL_FIXED"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard", "issues": ["Recharts width(-1)/height(-1) warnings persist from iter1 (not blocking)."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration2.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/iter2_results.xml",
+    "/app/test_reports/pytest/regression_results.xml"
+  ],
+  "action_items": [
+    "Validate the DocumentUpload.jsx fix (already applied by testing agent). Confirm no other components reference engineOverride incorrectly.",
+    "(LOW) Add input validation on Settings — olmocr_timeout currently allows non-numeric strings via HTML <input type='number'>; backend Pydantic int coercion will catch but a frontend hint would help.",
+    "(LOW) Consider showing the test-connection result text inline beneath the button (it renders but is small)."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 1138 lines — past the 700-line guideline. Recommend splitting into auth.py, documents.py, ocr_engines.py, copilot.py, exports.py modules.",
+    "API key masking is well-implemented: GET returns ***LAST4, PUT ignores any value beginning with *** so the real key isn't overwritten. Good security pattern.",
+    "Cross-tenant isolation verified: copilot/chat endpoint scopes db.documents.find_one by tenant_id, returning 404 for cross-tenant doc access. /tenants/me/ocr-settings is intrinsically per-tenant via /me.",
+    "extract_with_engine auto-fallback logic correctly records both attempts and falls back to gemini when olmocr fails or confidence < threshold. Verified end-to-end with a bad host.",
+    "/auth/register correctly hardens role to non-admin (carry-over from iter1 fix); this means registering 'TestTenantB' creates an 'operations' user, not 'admin'. Documented behaviour.",
+    "Co-Pilot endpoint uses Gemini via emergentintegrations; real call returns sensible answers about the document (verified: 'This document is a tax invoice from CoPilotTestCo.' for a generated invoice).",
+    "Missing useState declarations in React components (like DocumentUpload's engineOverride) should be caught by ESLint react/no-undef — recommend enabling in CI."
+  ],
+  "updated_files": [
+    "/app/frontend/src/pages/DocumentUpload.jsx (added missing useState for engineOverride)",
+    "/app/backend/tests/test_iteration2.py (new — 15 tests covering iter2 surface area)"
+  ],
+  "success_rate": {"backend": "100% (41/41: 15 iter2 + 26 regression)", "frontend": "100% after the DocumentUpload fix (all data-testids present, all flows including 30s Gemini Co-Pilot reply verified)"},
+  "test_credentials": "admin@docintel.io / Admin@123 (auto-seeded). TestTenantB registered via /api/auth/register is created as role='operations' due to iter1 hardening, used to verify 403/404 cross-tenant paths.",
+  "seed_data_creation": "Tests create TEST_-prefixed users (auto-cleaned) and synthetic PNG invoices (auto-deleted at end). OCR settings are reset to defaults (default_engine=gemini, empty olmocr_endpoint) by an autouse module-scoped teardown fixture so subsequent test runs aren't poisoned.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Two backend test files now: /app/backend/tests/backend_test.py (iter1 regression) and /app/backend/tests/test_iteration2.py (iter2). Run both together: `pytest /app/backend/tests/ -v`. Real Gemini calls take ~10–30s; the auto-fallback test takes the longest (~60s) because it first attempts olmocr (times out fast against nonexistent host) then runs Gemini. Co-Pilot chat consumes Gemini quota; allow up to 45s per call. DocumentUpload's engineOverride useState was missing in iter2 implementation — verify the fix at /app/frontend/src/pages/DocumentUpload.jsx line 13 is preserved.",
+  "rca of the issue": "Bug: /upload page crashed when staging a file because DocumentUpload.jsx referenced `engineOverride` and `setEngineOverride` at lines 40, 48, 172, 173 without ever declaring the useState. The conditional render `staged-files` panel evaluates `engineOverride` -> ReferenceError -> React error boundary surfaces 'Uncaught runtime errors' overlay. Fix: added `const [engineOverride, setEngineOverride] = useState('')` next to the other useState declarations. Verified by re-running the playwright test — upload-engine-select renders with the documented ['', 'gemini', 'olmocr', 'auto'] options."
+}

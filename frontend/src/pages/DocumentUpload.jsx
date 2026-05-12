@@ -10,6 +10,7 @@ export default function DocumentUpload() {
   const [uploading, setUploading] = useState(false);
   const [uploaded, setUploaded] = useState([]);
   const [autoProcess, setAutoProcess] = useState(true);
+  const [engineOverride, setEngineOverride] = useState("");
   const [usingCamera, setUsingCamera] = useState(false);
   const inputRef = useRef(null);
   const camRef = useRef(null);
@@ -37,6 +38,7 @@ export default function DocumentUpload() {
         const fd = new FormData();
         fd.append("file", files[0]);
         fd.append("auto_process", autoProcess);
+        if (engineOverride) fd.append("engine_override", engineOverride);
         const r = await api.post("/documents/upload", fd);
         setUploaded([r.data]);
         toast.success("Uploaded. Processing...");
@@ -44,6 +46,7 @@ export default function DocumentUpload() {
         const fd = new FormData();
         files.forEach((f) => fd.append("files", f));
         fd.append("auto_process", autoProcess);
+        if (engineOverride) fd.append("engine_override", engineOverride);
         const r = await api.post("/documents/upload-bulk", fd);
         setUploaded(r.data.documents);
         toast.success(`Uploaded ${r.data.uploaded} documents. Processing...`);
@@ -157,12 +160,26 @@ export default function DocumentUpload() {
 
           {files.length > 0 && (
             <div className="swiss-card mt-4" data-testid="staged-files">
-              <div className="px-4 py-3 border-b border-[color:var(--border-line)] flex items-center justify-between">
+              <div className="px-4 py-3 border-b border-[color:var(--border-line)] flex flex-wrap items-center justify-between gap-3">
                 <div className="label-tag">STAGED · {files.length}</div>
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 flex-wrap">
                   <label className="flex items-center gap-2 text-xs">
                     <input type="checkbox" checked={autoProcess} onChange={(e) => setAutoProcess(e.target.checked)} data-testid="auto-process-toggle" />
                     Auto-extract on upload
+                  </label>
+                  <label className="flex items-center gap-2 text-xs">
+                    <span className="label-tag">ENGINE</span>
+                    <select
+                      value={engineOverride}
+                      onChange={(e) => setEngineOverride(e.target.value)}
+                      className="input-flat !py-1 !px-2 text-xs w-auto"
+                      data-testid="upload-engine-select"
+                    >
+                      <option value="">tenant default</option>
+                      <option value="gemini">Gemini</option>
+                      <option value="olmocr">olmOCR</option>
+                      <option value="auto">Auto-route</option>
+                    </select>
                   </label>
                   <button onClick={upload} disabled={uploading} className="btn-primary" data-testid="upload-submit-button">
                     {uploading ? "Uploading…" : `Upload ${files.length} file${files.length > 1 ? "s" : ""}`}

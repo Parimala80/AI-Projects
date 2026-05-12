@@ -2,7 +2,7 @@ import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import {
   House, FilePlus, Files, Users, Buildings, ListChecks,
-  ChartBar, SignOut, BookOpen, Storefront,
+  ChartBar, SignOut, BookOpen, Storefront, Gear,
 } from "@phosphor-icons/react";
 
 const NAV = [
@@ -12,6 +12,7 @@ const NAV = [
   { to: "/vendors", label: "Vendors", icon: Storefront, roles: null },
   { to: "/users", label: "Users", icon: Users, roles: ["admin", "manager"] },
   { to: "/audit-logs", label: "Audit Logs", icon: ListChecks, roles: ["admin", "manager"] },
+  { to: "/settings", label: "Settings", icon: Gear, roles: ["admin"] },
   { to: "/developers", label: "API Reference", icon: BookOpen, roles: null },
 ];
 

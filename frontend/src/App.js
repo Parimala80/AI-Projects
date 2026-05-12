@@ -16,6 +16,7 @@ import Vendors from "./pages/Vendors";
 import Users from "./pages/Users";
 import AuditLogs from "./pages/AuditLogs";
 import ApiDocs from "./pages/ApiDocs";
+import Settings from "./pages/Settings";
 
 function Shell({ children, roles }) {
   return (
@@ -48,6 +49,7 @@ function App() {
             <Route path="/vendors" element={<Shell><Vendors /></Shell>} />
             <Route path="/users" element={<Shell roles={["admin", "manager"]}><Users /></Shell>} />
             <Route path="/audit-logs" element={<Shell roles={["admin", "manager"]}><AuditLogs /></Shell>} />
+            <Route path="/settings" element={<Shell roles={["admin"]}><Settings /></Shell>} />
             <Route path="/developers" element={<Shell><ApiDocs /></Shell>} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
