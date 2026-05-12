@@ -31,6 +31,19 @@ Build an enterprise-grade AI-powered Document Intelligence Platform that digitiz
 - REST APIs with OpenAPI/Swagger (`/docs`)
 - Dashboard analytics
 
+## Implementation Status — 2026-05-12 (Phase 2 — OCR Engine + Co-Pilot)
+✅ **Tenant-level OCR engine selection**: `gemini` | `olmocr` | `auto` (with confidence-based fallback)
+✅ **Self-hosted olmOCR integration**: tenant configures `olmocr_endpoint`, `olmocr_api_key`, `olmocr_model`, `olmocr_timeout`, `auto_fallback_threshold`
+✅ **Auto-route mode**: olmOCR primary → Gemini fallback on failure or confidence < threshold; each attempt is logged in `extraction_attempts`
+✅ **API-key masking**: stored, returned as `***LAST4`, PUT ignores masked-format input so key cannot be accidentally overwritten
+✅ **Connectivity test endpoint**: `POST /api/tenants/me/ocr-settings/test` pings `/v1/models` on the user's olmOCR server
+✅ **Per-upload + per-reprocess engine override**: Operations + Admin can pick engine in the Upload page; viewer's reprocess split-button supports gemini/olmocr/auto
+✅ **AI Co-Pilot chat panel** in DocumentViewer: floating button, full chat UI, starter prompts, real Gemini replies with document image + extracted fields + validations as context
+✅ **Co-Pilot configurable**: `copilot_enabled`, `copilot_model_provider` (gemini|openai|anthropic), `copilot_model_name`
+✅ **Engine badges**: Documents list shows `via {engine}`; viewer shows engine pill and full attempt timeline
+✅ **Admin-only Settings page** at `/settings` with deployment guide for olmOCR
+✅ **Testing**: 41/41 backend tests pass (15 new + 26 regression). Frontend e2e verified.
+
 ## Implementation Status — 2026-05-09 (Phase 1 / MVP)
 ✅ JWT cookie auth + bcrypt + brute-force protection + admin seeding
 ✅ Multi-tenant model with tenant isolation on every query
