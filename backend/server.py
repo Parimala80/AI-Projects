@@ -130,9 +130,26 @@ class OcrSettingsIn(BaseModel):
     olmocr_model: Optional[str] = "allenai/olmOCR-2-7B-1025-FP8"
     olmocr_timeout: Optional[int] = 120
     auto_fallback_threshold: Optional[float] = 0.5  # if confidence < this in auto mode, fall back
+    # Co-Pilot configuration
     copilot_enabled: Optional[bool] = True
-    copilot_model_provider: Optional[str] = "gemini"  # gemini | openai | anthropic
+    copilot_provider: Optional[str] = "gemini"      # gemini | azure_openai | m365_copilot | gemma | openai | anthropic
+    copilot_model_provider: Optional[str] = "gemini"  # legacy alias, kept for backward compat
     copilot_model_name: Optional[str] = "gemini-2.5-pro"
+    # Azure OpenAI provider credentials
+    azure_endpoint: Optional[str] = ""              # https://<resource>.openai.azure.com
+    azure_api_key: Optional[str] = ""
+    azure_deployment: Optional[str] = ""            # e.g. gpt-4o-prod
+    azure_api_version: Optional[str] = "2024-10-21"
+    # Microsoft 365 Copilot provider credentials
+    m365_tenant_id: Optional[str] = ""
+    m365_client_id: Optional[str] = ""
+    m365_client_secret: Optional[str] = ""
+    m365_scope: Optional[str] = "https://graph.microsoft.com/.default"
+    # Gemma (self-hosted) provider credentials
+    gemma_endpoint: Optional[str] = ""              # http://gpu-host:8001 (vLLM/Ollama OpenAI-compatible)
+    gemma_api_key: Optional[str] = ""
+    gemma_model: Optional[str] = "google/gemma-3-9b-it"
+    gemma_timeout: Optional[int] = 60
 
 class VendorIn(BaseModel):
     name: str
@@ -377,16 +394,9 @@ Be concise, accurate, and helpful. When the user asks for a correction, return e
 (field name + new value). When asked to explain a discrepancy, cite specific values. Avoid hallucinating
 data not visible in the document. Reply in plain text or short markdown."""
 
-async def copilot_reply(tenant_id: str, doc: dict, file_b64: str, mime: str,
-                        user_msg: str, history: List[Dict[str, str]]) -> str:
-    tenant = await db.tenants.find_one({"id": tenant_id}, {"_id": 0}) or {}
-    settings = tenant.get("ocr_settings") or {}
-    if settings.get("copilot_enabled") is False:
-        return "Co-Pilot is disabled for this tenant. Ask your admin to enable it in Settings."
-    provider = settings.get("copilot_model_provider") or "gemini"
-    model = settings.get("copilot_model_name") or "gemini-2.5-pro"
 
-    context = (
+def _build_copilot_context(doc: dict) -> str:
+    return (
         f"Document filename: {doc.get('filename')}\n"
         f"Detected type: {doc.get('doc_type')}\n"
         f"Confidence: {doc.get('confidence')}\n"
@@ -395,25 +405,204 @@ async def copilot_reply(tenant_id: str, doc: dict, file_b64: str, mime: str,
         f"Validation errors:\n{json.dumps(doc.get('validation_errors') or [], indent=2)}\n"
     )
 
+
+async def _copilot_emergent(provider: str, model: str, system_msg: str, user_text: str,
+                            file_b64: str, mime: str, doc_id: str) -> str:
+    """Use emergentintegrations (works for gemini/openai/anthropic via Emergent LLM Key)."""
+    chat = LlmChat(
+        api_key=EMERGENT_LLM_KEY,
+        session_id=f"copilot-{doc_id}-{uuid.uuid4()}",
+        system_message=system_msg,
+    ).with_model(provider, model)
+    attachments = []
+    if mime.startswith("image/") and file_b64:
+        attachments.append(ImageContent(image_base64=file_b64))
+    return (await chat.send_message(UserMessage(text=user_text, file_contents=attachments))).strip()
+
+
+async def _copilot_azure_openai(settings: Dict[str, Any], system_msg: str, user_text: str,
+                                history: List[Dict[str, str]], file_b64: str, mime: str) -> str:
+    endpoint = (settings.get("azure_endpoint") or "").strip().rstrip("/")
+    api_key = settings.get("azure_api_key") or ""
+    deployment = settings.get("azure_deployment") or ""
+    api_version = settings.get("azure_api_version") or "2024-10-21"
+    if not (endpoint and api_key and deployment):
+        return "Azure OpenAI is not fully configured (need endpoint, api_key, deployment)."
+    msgs = [{"role": "system", "content": system_msg}]
+    for m in (history or [])[-8:]:
+        msgs.append({"role": m.get("role", "user"), "content": m.get("content", "")})
+    if mime.startswith("image/") and file_b64:
+        msgs.append({"role": "user", "content": [
+            {"type": "text", "text": user_text},
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{file_b64}"}},
+        ]})
+    else:
+        msgs.append({"role": "user", "content": user_text})
+    url = f"{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            r = await client.post(url, headers={"api-key": api_key, "Content-Type": "application/json"},
+                                  json={"messages": msgs, "max_tokens": 1024, "temperature": 0.3})
+            r.raise_for_status()
+            data = r.json()
+        return (data.get("choices") or [{}])[0].get("message", {}).get("content", "").strip() or "(empty reply)"
+    except httpx.HTTPStatusError as e:
+        return f"Azure OpenAI error {e.response.status_code}: {e.response.text[:200]}"
+    except Exception as e:
+        return f"Azure OpenAI request failed: {e}"
+
+
+async def _m365_get_token(tenant_id_db: str, settings: Dict[str, Any]) -> Optional[str]:
+    """Get M365 access token via client_credentials, cached in MongoDB."""
+    m_tid = (settings.get("m365_tenant_id") or "").strip()
+    cid = (settings.get("m365_client_id") or "").strip()
+    secret = (settings.get("m365_client_secret") or "").strip()
+    scope = settings.get("m365_scope") or "https://graph.microsoft.com/.default"
+    if not (m_tid and cid and secret):
+        return None
+    cache = await db.token_cache.find_one({"tenant_id": tenant_id_db, "client_id": cid})
+    if cache and cache.get("expires_at"):
+        try:
+            exp = datetime.fromisoformat(cache["expires_at"])
+            if exp > datetime.now(timezone.utc) + timedelta(minutes=2):
+                return cache["access_token"]
+        except Exception:
+            pass
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post(
+                f"https://login.microsoftonline.com/{m_tid}/oauth2/v2.0/token",
+                data={"grant_type": "client_credentials", "client_id": cid,
+                      "client_secret": secret, "scope": scope})
+            r.raise_for_status()
+            tok = r.json()
+        await db.token_cache.update_one(
+            {"tenant_id": tenant_id_db, "client_id": cid},
+            {"$set": {"access_token": tok["access_token"],
+                      "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=tok["expires_in"])).isoformat(),
+                      "updated_at": datetime.now(timezone.utc).isoformat()}},
+            upsert=True)
+        return tok["access_token"]
+    except Exception as e:
+        logger.warning("m365 token failed: %s", e)
+        return None
+
+
+async def _copilot_m365(tenant_id_db: str, settings: Dict[str, Any], user_text: str,
+                        history: List[Dict[str, str]], context: str) -> str:
+    token = await _m365_get_token(tenant_id_db, settings)
+    if not token:
+        return ("Microsoft 365 Copilot is not fully configured (need tenant_id, client_id, client_secret) "
+                "or token acquisition failed.")
+    # Compose grounding context as the first user message
+    convo_msgs = [{"role": "user", "content": f"CONTEXT:\n{context}"}]
+    for m in (history or [])[-8:]:
+        convo_msgs.append({"role": m.get("role", "user"), "content": m.get("content", "")})
+    convo_msgs.append({"role": "user", "content": user_text})
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            # 1) create a conversation
+            cr = await client.post(
+                "https://graph.microsoft.com/beta/copilot/conversations",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={})
+            if cr.status_code >= 400:
+                return f"M365 Copilot conversation create failed ({cr.status_code}): {cr.text[:200]}"
+            conv_id = cr.json().get("id")
+            # 2) send chat
+            sr = await client.post(
+                f"https://graph.microsoft.com/beta/copilot/conversations/{conv_id}/chat",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={"messages": convo_msgs})
+            if sr.status_code >= 400:
+                return (f"M365 Copilot chat failed ({sr.status_code}): {sr.text[:300]}. "
+                        f"Note: the M365 Copilot Chat API requires delegated permissions and admin consent; "
+                        f"application-only tokens may be rejected.")
+            data = sr.json()
+        # Response shape varies; try common paths
+        if isinstance(data, dict):
+            msgs = data.get("messages") or data.get("value") or []
+            for m in reversed(msgs):
+                c = m.get("content") if isinstance(m, dict) else None
+                if c:
+                    return c if isinstance(c, str) else json.dumps(c)
+            if data.get("text"):
+                return str(data["text"])
+        return json.dumps(data)[:600]
+    except Exception as e:
+        logger.exception("m365 copilot failed")
+        return f"M365 Copilot request failed: {e}"
+
+
+async def _copilot_gemma(settings: Dict[str, Any], system_msg: str, user_text: str,
+                         history: List[Dict[str, str]], file_b64: str, mime: str) -> str:
+    """Call a self-hosted Gemma instance (vLLM / Ollama OpenAI-compatible API)."""
+    endpoint = (settings.get("gemma_endpoint") or "").strip().rstrip("/")
+    if not endpoint:
+        return "Gemma endpoint is not configured."
+    api_key = settings.get("gemma_api_key") or ""
+    model = settings.get("gemma_model") or "google/gemma-3-9b-it"
+    timeout = int(settings.get("gemma_timeout") or 60)
+    msgs = [{"role": "system", "content": system_msg}]
+    for m in (history or [])[-8:]:
+        msgs.append({"role": m.get("role", "user"), "content": m.get("content", "")})
+    if mime.startswith("image/") and file_b64:
+        msgs.append({"role": "user", "content": [
+            {"type": "text", "text": user_text},
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{file_b64}"}},
+        ]})
+    else:
+        msgs.append({"role": "user", "content": user_text})
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.post(f"{endpoint}/v1/chat/completions",
+                                  headers=headers,
+                                  json={"model": model, "messages": msgs, "max_tokens": 1024, "temperature": 0.3})
+            r.raise_for_status()
+            data = r.json()
+        return (data.get("choices") or [{}])[0].get("message", {}).get("content", "").strip() or "(empty reply)"
+    except httpx.HTTPStatusError as e:
+        return f"Gemma error {e.response.status_code}: {e.response.text[:200]}"
+    except Exception as e:
+        return f"Gemma request failed: {e}"
+
+
+async def copilot_reply(tenant_id: str, doc: dict, file_b64: str, mime: str,
+                        user_msg: str, history: List[Dict[str, str]]) -> str:
+    tenant = await db.tenants.find_one({"id": tenant_id}, {"_id": 0}) or {}
+    settings = tenant.get("ocr_settings") or {}
+    if settings.get("copilot_enabled") is False:
+        return "Co-Pilot is disabled for this tenant. Ask your admin to enable it in Settings."
+
+    provider = (settings.get("copilot_provider")
+                or settings.get("copilot_model_provider")
+                or "gemini").lower()
+    model = settings.get("copilot_model_name") or "gemini-2.5-pro"
+
+    context = _build_copilot_context(doc)
     convo_text = ""
     for m in (history or [])[-8:]:
-        role = m.get("role", "user").upper()
-        convo_text += f"\n[{role}]: {m.get('content', '')}\n"
-
+        convo_text += f"\n[{m.get('role','user').upper()}]: {m.get('content','')}\n"
     full_text = f"{context}\n\n--- Conversation so far ---{convo_text}\n[USER]: {user_msg}"
 
     try:
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=f"copilot-{doc.get('id')}-{uuid.uuid4()}",
-            system_message=COPILOT_SYSTEM,
-        ).with_model(provider, model)
-        # attach the document image so co-pilot can actually see it
-        attachments = []
-        if mime.startswith("image/") and file_b64:
-            attachments.append(ImageContent(image_base64=file_b64))
-        msg = UserMessage(text=full_text, file_contents=attachments)
-        return (await chat.send_message(msg)).strip()
+        if provider in ("gemini", "openai", "anthropic"):
+            return await _copilot_emergent(provider, model, COPILOT_SYSTEM, full_text,
+                                           file_b64, mime, doc.get("id", ""))
+        if provider == "azure_openai":
+            return await _copilot_azure_openai(settings, COPILOT_SYSTEM, user_msg,
+                                                [{"role": "user", "content": f"CONTEXT:\n{context}"}] + (history or []),
+                                                file_b64, mime)
+        if provider == "m365_copilot":
+            return await _copilot_m365(tenant_id, settings, user_msg, history or [], context)
+        if provider == "gemma":
+            return await _copilot_gemma(settings, COPILOT_SYSTEM, user_msg,
+                                         [{"role": "user", "content": f"CONTEXT:\n{context}"}] + (history or []),
+                                         file_b64, mime)
+        return f"Unknown copilot provider: {provider}"
     except Exception as e:
         logger.exception("copilot failed")
         return f"Co-Pilot error: {e}"
@@ -551,13 +740,25 @@ async def update_my_tenant(payload: TenantIn, user: dict = Depends(require_roles
                                 {"$set": {"name": payload.name, "gstin": payload.gstin}})
     return await db.tenants.find_one({"id": user["tenant_id"]}, {"_id": 0})
 
+SECRET_FIELDS = ["olmocr_api_key", "azure_api_key", "m365_client_secret", "gemma_api_key"]
+
+def _mask_secret(v: Optional[str]) -> str:
+    if not v:
+        return ""
+    if str(v).startswith("***"):
+        return str(v)
+    s = str(v)
+    return "***" + s[-4:] if len(s) >= 4 else "***"
+
+
 @api.get("/tenants/me/ocr-settings")
 async def get_ocr_settings(user: dict = Depends(get_current_user)):
     t = await db.tenants.find_one({"id": user["tenant_id"]}, {"_id": 0}) or {}
-    s = t.get("ocr_settings") or {}
-    # never leak the api key back in full
-    if s.get("olmocr_api_key"):
-        s = {**s, "olmocr_api_key": "***" + s["olmocr_api_key"][-4:]}
+    s = dict(t.get("ocr_settings") or {})
+    # mask all secret fields before returning
+    for f in SECRET_FIELDS:
+        if s.get(f):
+            s[f] = _mask_secret(s[f])
     defaults = {
         "default_engine": "gemini",
         "olmocr_endpoint": "",
@@ -566,28 +767,51 @@ async def get_ocr_settings(user: dict = Depends(get_current_user)):
         "olmocr_timeout": 120,
         "auto_fallback_threshold": 0.5,
         "copilot_enabled": True,
+        "copilot_provider": "gemini",
         "copilot_model_provider": "gemini",
         "copilot_model_name": "gemini-2.5-pro",
+        "azure_endpoint": "",
+        "azure_api_key": "",
+        "azure_deployment": "",
+        "azure_api_version": "2024-10-21",
+        "m365_tenant_id": "",
+        "m365_client_id": "",
+        "m365_client_secret": "",
+        "m365_scope": "https://graph.microsoft.com/.default",
+        "gemma_endpoint": "",
+        "gemma_api_key": "",
+        "gemma_model": "google/gemma-3-9b-it",
+        "gemma_timeout": 60,
     }
     return {**defaults, **s}
 
 @api.put("/tenants/me/ocr-settings")
 async def update_ocr_settings(payload: OcrSettingsIn, user: dict = Depends(require_roles("admin"))):
-    incoming = {k: v for k, v in payload.model_dump().items() if v is not None}
-    engine = (incoming.get("default_engine") or "").lower()
+    # Only fields explicitly sent by the client should overwrite existing values
+    incoming = payload.model_dump(exclude_unset=True)
+    engine = (incoming.get("default_engine") or "").lower() if "default_engine" in incoming else None
     if engine and engine not in ("gemini", "olmocr", "auto"):
         raise HTTPException(400, "default_engine must be one of: gemini, olmocr, auto")
-    # if api_key starts with *** treat as masked placeholder and don't overwrite
-    if str(incoming.get("olmocr_api_key", "")).startswith("***"):
-        incoming.pop("olmocr_api_key", None)
+    provider = (incoming.get("copilot_provider") or "").lower() if "copilot_provider" in incoming else None
+    if provider and provider not in ("gemini", "openai", "anthropic", "azure_openai", "m365_copilot", "gemma"):
+        raise HTTPException(400, "copilot_provider must be one of: gemini, openai, anthropic, azure_openai, m365_copilot, gemma")
+    # mirror copilot_provider to legacy copilot_model_provider for back-compat consumers
+    if provider:
+        incoming["copilot_model_provider"] = provider
+    # if any secret comes in as masked value, do not overwrite the real one
+    for f in SECRET_FIELDS:
+        if str(incoming.get(f, "")).startswith("***"):
+            incoming.pop(f, None)
     existing = (await db.tenants.find_one({"id": user["tenant_id"]}, {"_id": 0}) or {}).get("ocr_settings") or {}
     merged = {**existing, **incoming}
     await db.tenants.update_one({"id": user["tenant_id"]}, {"$set": {"ocr_settings": merged}})
     await log_audit(user["tenant_id"], user["id"], "update_ocr_settings", "tenant",
-                    user["tenant_id"], {"engine": merged.get("default_engine")})
+                    user["tenant_id"], {"engine": merged.get("default_engine"),
+                                        "copilot_provider": merged.get("copilot_provider")})
     masked = dict(merged)
-    if masked.get("olmocr_api_key"):
-        masked["olmocr_api_key"] = "***" + masked["olmocr_api_key"][-4:]
+    for f in SECRET_FIELDS:
+        if masked.get(f):
+            masked[f] = _mask_secret(masked[f])
     return masked
 
 @api.post("/tenants/me/ocr-settings/test")

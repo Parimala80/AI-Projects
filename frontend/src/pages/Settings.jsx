@@ -200,33 +200,203 @@ export default function Settings() {
               </div>
               <Robot size={20} weight="bold" />
             </div>
-            <div className="p-6 grid md:grid-cols-3 gap-4">
-              <label className="flex items-center gap-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={!!s.copilot_enabled}
-                  onChange={(e) => upd("copilot_enabled", e.target.checked)}
-                  data-testid="copilot-enabled-toggle"
-                />
-                <span className="text-sm font-semibold">Enable Co-Pilot</span>
-              </label>
+            <div className="p-6 space-y-5">
+              <div className="flex items-center justify-between border-b border-[color:var(--border-line)] pb-4">
+                <label className="flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={!!s.copilot_enabled}
+                    onChange={(e) => upd("copilot_enabled", e.target.checked)}
+                    data-testid="copilot-enabled-toggle"
+                  />
+                  <span className="text-sm font-semibold">Enable Co-Pilot</span>
+                </label>
+                <span className="label-tag">{s.copilot_provider || "gemini"}</span>
+              </div>
+
               <div>
                 <label className="label-tag block mb-1.5">PROVIDER</label>
-                <select className="input-flat" value={s.copilot_model_provider} onChange={(e) => upd("copilot_model_provider", e.target.value)} data-testid="copilot-provider-select">
-                  <option value="gemini">gemini</option>
-                  <option value="openai">openai</option>
-                  <option value="anthropic">anthropic</option>
+                <select
+                  className="input-flat"
+                  value={s.copilot_provider || "gemini"}
+                  onChange={(e) => upd("copilot_provider", e.target.value)}
+                  data-testid="copilot-provider-select"
+                >
+                  <option value="gemini">Gemini (Emergent LLM Key)</option>
+                  <option value="openai">OpenAI (Emergent LLM Key)</option>
+                  <option value="anthropic">Anthropic (Emergent LLM Key)</option>
+                  <option value="azure_openai">Azure OpenAI Service</option>
+                  <option value="m365_copilot">Microsoft 365 Copilot</option>
+                  <option value="gemma">Gemma (self-hosted)</option>
                 </select>
               </div>
-              <div>
-                <label className="label-tag block mb-1.5">MODEL</label>
-                <input
-                  className="input-flat"
-                  value={s.copilot_model_name || ""}
-                  onChange={(e) => upd("copilot_model_name", e.target.value)}
-                  data-testid="copilot-model-input"
-                />
-              </div>
+
+              {/* Provider-specific credential blocks */}
+              {(s.copilot_provider === "gemini" || s.copilot_provider === "openai" || s.copilot_provider === "anthropic" || !s.copilot_provider) && (
+                <div className="border-l-2 border-[color:var(--accent-blue)] pl-4" data-testid="copilot-emergent-config">
+                  <div className="label-tag mb-2">EMERGENT LLM KEY · MODEL</div>
+                  <input
+                    className="input-flat"
+                    value={s.copilot_model_name || ""}
+                    onChange={(e) => upd("copilot_model_name", e.target.value)}
+                    data-testid="copilot-model-input"
+                    placeholder={s.copilot_provider === "openai" ? "gpt-5" : s.copilot_provider === "anthropic" ? "claude-sonnet-4-5-20250929" : "gemini-2.5-pro"}
+                  />
+                  <div className="text-xs text-[color:var(--text-secondary)] mt-2 leading-relaxed">
+                    Uses your Emergent Universal Key. No extra credentials needed.
+                  </div>
+                </div>
+              )}
+
+              {s.copilot_provider === "azure_openai" && (
+                <div className="border-l-2 border-[color:var(--accent-blue)] pl-4 space-y-3" data-testid="copilot-azure-config">
+                  <div className="label-tag mb-1">AZURE OPENAI · CREDENTIALS</div>
+                  <div>
+                    <label className="label-tag block mb-1.5">ENDPOINT</label>
+                    <input
+                      className="input-flat"
+                      value={s.azure_endpoint || ""}
+                      onChange={(e) => upd("azure_endpoint", e.target.value)}
+                      placeholder="https://<resource>.openai.azure.com"
+                      data-testid="azure-endpoint-input"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="label-tag block mb-1.5">DEPLOYMENT NAME</label>
+                      <input
+                        className="input-flat"
+                        value={s.azure_deployment || ""}
+                        onChange={(e) => upd("azure_deployment", e.target.value)}
+                        placeholder="gpt-4o-prod"
+                        data-testid="azure-deployment-input"
+                      />
+                    </div>
+                    <div>
+                      <label className="label-tag block mb-1.5">API VERSION</label>
+                      <input
+                        className="input-flat"
+                        value={s.azure_api_version || "2024-10-21"}
+                        onChange={(e) => upd("azure_api_version", e.target.value)}
+                        data-testid="azure-api-version-input"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="label-tag block mb-1.5">API KEY</label>
+                    <input
+                      type="password"
+                      className="input-flat"
+                      value={s.azure_api_key || ""}
+                      onChange={(e) => upd("azure_api_key", e.target.value)}
+                      data-testid="azure-apikey-input"
+                    />
+                  </div>
+                  <div className="text-xs text-[color:var(--text-secondary)] leading-relaxed">
+                    Get these from Azure Portal → Azure OpenAI → Keys and Endpoint. The deployment name is what you chose when deploying the model in Azure AI Foundry.
+                  </div>
+                </div>
+              )}
+
+              {s.copilot_provider === "m365_copilot" && (
+                <div className="border-l-2 border-[color:var(--accent-blue)] pl-4 space-y-3" data-testid="copilot-m365-config">
+                  <div className="label-tag mb-1">MICROSOFT 365 COPILOT · CREDENTIALS</div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="label-tag block mb-1.5">TENANT ID</label>
+                      <input
+                        className="input-flat"
+                        value={s.m365_tenant_id || ""}
+                        onChange={(e) => upd("m365_tenant_id", e.target.value)}
+                        placeholder="00000000-0000-0000-0000-000000000000"
+                        data-testid="m365-tenant-input"
+                      />
+                    </div>
+                    <div>
+                      <label className="label-tag block mb-1.5">CLIENT ID</label>
+                      <input
+                        className="input-flat"
+                        value={s.m365_client_id || ""}
+                        onChange={(e) => upd("m365_client_id", e.target.value)}
+                        data-testid="m365-client-input"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="label-tag block mb-1.5">CLIENT SECRET</label>
+                    <input
+                      type="password"
+                      className="input-flat"
+                      value={s.m365_client_secret || ""}
+                      onChange={(e) => upd("m365_client_secret", e.target.value)}
+                      data-testid="m365-secret-input"
+                    />
+                  </div>
+                  <div>
+                    <label className="label-tag block mb-1.5">SCOPE</label>
+                    <input
+                      className="input-flat"
+                      value={s.m365_scope || "https://graph.microsoft.com/.default"}
+                      onChange={(e) => upd("m365_scope", e.target.value)}
+                      data-testid="m365-scope-input"
+                    />
+                  </div>
+                  <div className="text-xs text-[color:var(--text-secondary)] leading-relaxed">
+                    Register an app in Azure AD (Entra ID), grant <code className="font-mono">Copilot.Read</code> permission, and have an admin consent. <strong>Note:</strong> the M365 Copilot Chat API is in beta and typically expects delegated user permissions — application-only tokens may be rejected. If that happens, deploy a service account or use the embedded Copilot Studio bot via Direct Line as an alternative.
+                  </div>
+                </div>
+              )}
+
+              {s.copilot_provider === "gemma" && (
+                <div className="border-l-2 border-[color:var(--accent-blue)] pl-4 space-y-3" data-testid="copilot-gemma-config">
+                  <div className="label-tag mb-1">GEMMA · SELF-HOSTED ENDPOINT</div>
+                  <div>
+                    <label className="label-tag block mb-1.5">ENDPOINT</label>
+                    <input
+                      className="input-flat"
+                      value={s.gemma_endpoint || ""}
+                      onChange={(e) => upd("gemma_endpoint", e.target.value)}
+                      placeholder="http://gpu-host:8001"
+                      data-testid="gemma-endpoint-input"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="label-tag block mb-1.5">MODEL</label>
+                      <input
+                        className="input-flat"
+                        value={s.gemma_model || ""}
+                        onChange={(e) => upd("gemma_model", e.target.value)}
+                        placeholder="google/gemma-3-9b-it"
+                        data-testid="gemma-model-input"
+                      />
+                    </div>
+                    <div>
+                      <label className="label-tag block mb-1.5">TIMEOUT (s)</label>
+                      <input
+                        type="number"
+                        className="input-flat"
+                        value={s.gemma_timeout || 60}
+                        onChange={(e) => upd("gemma_timeout", parseInt(e.target.value) || 60)}
+                        data-testid="gemma-timeout-input"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="label-tag block mb-1.5">API KEY (optional)</label>
+                    <input
+                      type="password"
+                      className="input-flat"
+                      value={s.gemma_api_key || ""}
+                      onChange={(e) => upd("gemma_api_key", e.target.value)}
+                      data-testid="gemma-apikey-input"
+                    />
+                  </div>
+                  <div className="text-xs text-[color:var(--text-secondary)] leading-relaxed">
+                    Run <code className="font-mono">vllm serve google/gemma-3-9b-it --port 8001</code> on your GPU box or use Ollama with its OpenAI-compatible bridge.
+                  </div>
+                </div>
+              )}
             </div>
           </section>
         </div>

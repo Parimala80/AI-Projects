@@ -1,0 +1,51 @@
+{
+  "summary": "Iteration 3 testing of multi-provider Co-Pilot (gemini, openai, anthropic, azure_openai, m365_copilot, gemma). Backend: 21/21 iter3 tests + 15/15 iter2 + 26/26 iter1 = 62/62 PASS (100%) in 61s, real Gemini call verified, Azure/M365/Gemma error paths return graceful 200 string replies (not 5xx). Frontend: Settings page provider dropdown shows all 6 providers; dynamic blocks (copilot-emergent-config / copilot-azure-config / copilot-m365-config / copilot-gemma-config) toggle correctly with only the relevant block visible; saving credentials triggers a 'Settings saved' toast; after reload secrets are masked as ***LAST4 while non-secret fields are preserved. Regression smoke (Dashboard, Documents list, Document Viewer, Audit Logs with new update_ocr_settings + copilot_provider entries) all render fine.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard", "issues": ["Recharts width(-1)/height(-1) warning persists from iter1/iter2 (cosmetic, not blocking)."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration3.py",
+    "/app/backend/tests/test_iteration2.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/iter3_results.xml",
+    "/app/test_reports/pytest/iter3_full_results.xml"
+  ],
+  "action_items": [
+    "(None blocking) Optional: split server.py (now 1363 lines) into auth.py / documents.py / ocr_engines.py / copilot.py / exports.py — exceeds 700-line guideline.",
+    "(LOW) Recharts width(-1)/height(-1) chart container warnings on Dashboard persist — wrap chart in a sized parent with minWidth/minHeight."
+  ],
+  "critical_code_review_comments": [
+    "PUT /tenants/me/ocr-settings now uses payload.model_dump(exclude_unset=True) — partial updates correctly preserve all unsent fields (verified by setting all credentials then sending {gemma_model: 'x'} and confirming everything else stays).",
+    "SECRET_FIELDS = ['olmocr_api_key','azure_api_key','m365_client_secret','gemma_api_key'] are all masked on GET as ***LAST4 and silently ignored on PUT when starting with ***. Verified plaintext does NOT leak in any response. Strong security pattern.",
+    "copilot_provider validation: rejects unknown values with 400 ('must be one of: gemini, openai, anthropic, azure_openai, m365_copilot, gemma') and mirrors to legacy copilot_model_provider for back-compat.",
+    "copilot_reply routes correctly to _copilot_emergent / _copilot_azure_openai / _copilot_m365 / _copilot_gemma based on provider. All branches return strings (never raise) — outer try/except adds a defensive 'Co-Pilot error: {e}' net.",
+    "Azure OpenAI handler: tries httpx call, catches HTTPStatusError -> 'Azure OpenAI error {code}' and generic Exception -> 'Azure OpenAI request failed: {e}'. Verified with fake host -> graceful 200 reply.",
+    "M365 Copilot handler: _m365_get_token uses MongoDB token cache (db.token_cache) with 2-min skew, falls through with None on failure; _copilot_m365 returns 'Microsoft 365 Copilot is not fully configured...' or '...failed (status)...' string. Verified does not crash with fake creds.",
+    "Gemma handler: hits OpenAI-compatible /v1/chat/completions on configured endpoint, returns 'Gemma request failed: {e}' or 'Gemma error {code}' on failure. Verified.",
+    "Audit log records update_ocr_settings action with details.copilot_provider — verified via /api/audit-logs GET and visually in UI.",
+    "RBAC: non-admin (operations user) PUT /tenants/me/ocr-settings returns 403 — confirmed.",
+    "Frontend Settings: all 9 new data-testids exist (copilot-provider-select, copilot-emergent-config, copilot-azure-config + azure-endpoint/deployment/apikey/api-version-input, copilot-m365-config + m365-tenant/client/secret/scope-input, copilot-gemma-config + gemma-endpoint/model/apikey/timeout-input). Provider switch shows ONLY the matching block.",
+    "server.py is 1363 lines (was 1138 in iter2) — past 700-line guideline. Recommend module split. Not blocking."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration3.py (new — 21 tests covering iter3 surface area: schema defaults, partial PUT, mask preservation, all 6 providers, invalid provider 400, non-admin 403, audit log, real Gemini reply, graceful Azure/M365/Gemma errors, plus regression on olmocr masking + documents list + dashboard stats)"
+  ],
+  "success_rate": {
+    "backend": "100% (62/62: 21 iter3 + 15 iter2 + 26 iter1)",
+    "frontend": "100% (Settings page provider dropdown + 4 dynamic config blocks + save + reload-masking all verified; dashboard/documents/viewer/audit-logs regression smoke clean)"
+  },
+  "test_credentials": "admin@docintel.io / Admin@123 (auto-seeded). TEST_iter3ops_* user is created via /api/users (role=operations) for 403 RBAC tests and auto-deleted by fixture teardown.",
+  "seed_data_creation": "Test fixtures create one temporary operations user, one synthetic PNG invoice document, and stale ocr_settings — all are cleaned up by the autouse reset_at_end fixture which restores DEFAULTS (copilot_provider=gemini, all secret/endpoint fields empty) at end of the module. After the UI test the provider was also explicitly reset to gemini via the Save button.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Three backend test files now: backend_test.py (iter1, 26 tests), test_iteration2.py (iter2, 15 tests), test_iteration3.py (iter3, 21 tests). Run all together: `pytest /app/backend/tests/ -v` (~60s, real Gemini call ~30s). Real LLM calls (gemini/openai/anthropic via Emergent key) take ~10-30s each; azure_openai/m365_copilot/gemma error-path tests are fast (~5s) because they hit nonexistent hosts. Tenant ocr_settings are reset to DEFAULTS at module end. The Microsoft 365 Copilot beta /copilot/conversations endpoint requires delegated permissions and admin consent — our code path handles this with a graceful string reply, do not treat 4xx responses from MS Graph as a bug. All 9 new Settings data-testids documented in iter3 problem statement are present and verified.",
+  "rca of the issue": "No bugs found in iter3 — the partial-PUT fix (model_dump(exclude_unset=True)), masking of all 4 secret fields, 6-provider routing, validation, RBAC, and audit log are all working end-to-end. Iter2's DocumentUpload engineOverride fix is preserved."
+}
