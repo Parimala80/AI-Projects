@@ -150,6 +150,11 @@ class OcrSettingsIn(BaseModel):
     gemma_api_key: Optional[str] = ""
     gemma_model: Optional[str] = "google/gemma-3-9b-it"
     gemma_timeout: Optional[int] = 60
+    # OpenCode Zen (AI gateway, OpenAI-compatible)
+    opencode_base_url: Optional[str] = "https://opencode.ai/zen/go/v1"
+    opencode_api_key: Optional[str] = ""
+    opencode_model: Optional[str] = "deepseek-v4-pro"
+    opencode_timeout: Optional[int] = 60
 
 class VendorIn(BaseModel):
     name: str
@@ -570,6 +575,43 @@ async def _copilot_gemma(settings: Dict[str, Any], system_msg: str, user_text: s
         return f"Gemma request failed: {e}"
 
 
+async def _copilot_opencode(settings: Dict[str, Any], system_msg: str, user_text: str,
+                            history: List[Dict[str, str]], file_b64: str, mime: str) -> str:
+    """Call OpenCode Zen (AI gateway, OpenAI-compatible chat completions)."""
+    base = (settings.get("opencode_base_url") or "https://opencode.ai/zen/go/v1").strip().rstrip("/")
+    api_key = settings.get("opencode_api_key") or ""
+    model = settings.get("opencode_model") or "deepseek-v4-pro"
+    timeout = int(settings.get("opencode_timeout") or 60)
+    if not api_key:
+        return "OpenCode Zen API key is not configured. Add it in Settings → Co-Pilot."
+    # Whitelist of known multimodal models in OpenCode Zen catalogue (best-effort)
+    vision_capable = {"mimo-v2-omni", "mimo-v2.5-pro", "minimax-m3"}
+    use_image = mime.startswith("image/") and file_b64 and model in vision_capable
+    msgs = [{"role": "system", "content": system_msg}]
+    for m in (history or [])[-8:]:
+        msgs.append({"role": m.get("role", "user"), "content": m.get("content", "")})
+    if use_image:
+        msgs.append({"role": "user", "content": [
+            {"type": "text", "text": user_text},
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{file_b64}"}},
+        ]})
+    else:
+        msgs.append({"role": "user", "content": user_text})
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.post(f"{base}/chat/completions",
+                                  headers=headers,
+                                  json={"model": model, "messages": msgs, "max_tokens": 1024, "temperature": 0.3})
+            r.raise_for_status()
+            data = r.json()
+        return (data.get("choices") or [{}])[0].get("message", {}).get("content", "").strip() or "(empty reply)"
+    except httpx.HTTPStatusError as e:
+        return f"OpenCode Zen error {e.response.status_code}: {e.response.text[:200]}"
+    except Exception as e:
+        return f"OpenCode Zen request failed: {e}"
+
+
 async def copilot_reply(tenant_id: str, doc: dict, file_b64: str, mime: str,
                         user_msg: str, history: List[Dict[str, str]]) -> str:
     tenant = await db.tenants.find_one({"id": tenant_id}, {"_id": 0}) or {}
@@ -602,6 +644,10 @@ async def copilot_reply(tenant_id: str, doc: dict, file_b64: str, mime: str,
             return await _copilot_gemma(settings, COPILOT_SYSTEM, user_msg,
                                          [{"role": "user", "content": f"CONTEXT:\n{context}"}] + (history or []),
                                          file_b64, mime)
+        if provider == "opencode_zen":
+            return await _copilot_opencode(settings, COPILOT_SYSTEM, user_msg,
+                                            [{"role": "user", "content": f"CONTEXT:\n{context}"}] + (history or []),
+                                            file_b64, mime)
         return f"Unknown copilot provider: {provider}"
     except Exception as e:
         logger.exception("copilot failed")
@@ -740,7 +786,7 @@ async def update_my_tenant(payload: TenantIn, user: dict = Depends(require_roles
                                 {"$set": {"name": payload.name, "gstin": payload.gstin}})
     return await db.tenants.find_one({"id": user["tenant_id"]}, {"_id": 0})
 
-SECRET_FIELDS = ["olmocr_api_key", "azure_api_key", "m365_client_secret", "gemma_api_key"]
+SECRET_FIELDS = ["olmocr_api_key", "azure_api_key", "m365_client_secret", "gemma_api_key", "opencode_api_key"]
 
 def _mask_secret(v: Optional[str]) -> str:
     if not v:
@@ -782,6 +828,10 @@ async def get_ocr_settings(user: dict = Depends(get_current_user)):
         "gemma_api_key": "",
         "gemma_model": "google/gemma-3-9b-it",
         "gemma_timeout": 60,
+        "opencode_base_url": "https://opencode.ai/zen/go/v1",
+        "opencode_api_key": "",
+        "opencode_model": "deepseek-v4-pro",
+        "opencode_timeout": 60,
     }
     return {**defaults, **s}
 
@@ -793,8 +843,8 @@ async def update_ocr_settings(payload: OcrSettingsIn, user: dict = Depends(requi
     if engine and engine not in ("gemini", "olmocr", "auto"):
         raise HTTPException(400, "default_engine must be one of: gemini, olmocr, auto")
     provider = (incoming.get("copilot_provider") or "").lower() if "copilot_provider" in incoming else None
-    if provider and provider not in ("gemini", "openai", "anthropic", "azure_openai", "m365_copilot", "gemma"):
-        raise HTTPException(400, "copilot_provider must be one of: gemini, openai, anthropic, azure_openai, m365_copilot, gemma")
+    if provider and provider not in ("gemini", "openai", "anthropic", "azure_openai", "m365_copilot", "gemma", "opencode_zen"):
+        raise HTTPException(400, "copilot_provider must be one of: gemini, openai, anthropic, azure_openai, m365_copilot, gemma, opencode_zen")
     # mirror copilot_provider to legacy copilot_model_provider for back-compat consumers
     if provider:
         incoming["copilot_model_provider"] = provider
@@ -832,6 +882,55 @@ async def test_olmocr(user: dict = Depends(require_roles("admin"))):
                 "body": r.text[:400]}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+# 5-minute in-memory cache for OpenCode Zen model catalogue (keyed by tenant_id)
+_OPENCODE_MODEL_CACHE: Dict[str, Dict[str, Any]] = {}
+
+@api.get("/tenants/me/copilot/models")
+async def list_copilot_models(provider: str = Query("opencode_zen"),
+                              refresh: bool = Query(False),
+                              user: dict = Depends(get_current_user)):
+    """Fetch the live model catalogue for a Co-Pilot provider that supports /models discovery."""
+    if provider != "opencode_zen":
+        # For now, only OpenCode Zen supports dynamic model discovery here.
+        return {"provider": provider, "models": [], "note": "Model discovery not implemented for this provider."}
+    t = await db.tenants.find_one({"id": user["tenant_id"]}, {"_id": 0}) or {}
+    s = t.get("ocr_settings") or {}
+    base = (s.get("opencode_base_url") or "https://opencode.ai/zen/go/v1").strip().rstrip("/")
+    api_key = s.get("opencode_api_key") or ""
+    cache_key = f"{user['tenant_id']}::{base}"
+    now = datetime.now(timezone.utc)
+    cached = _OPENCODE_MODEL_CACHE.get(cache_key)
+    if cached and not refresh:
+        if (now - cached["fetched_at"]).total_seconds() < 300:
+            return {"provider": "opencode_zen", "models": cached["models"],
+                    "cached": True, "fetched_at": cached["fetched_at"].isoformat()}
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"{base}/models", headers=headers)
+            r.raise_for_status()
+            payload = r.json()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(e.response.status_code,
+                            f"OpenCode Zen error: {e.response.text[:200]}")
+    except Exception as e:
+        raise HTTPException(502, f"OpenCode Zen request failed: {e}")
+    raw = payload.get("data") or []
+    # known multimodal hints
+    vision_capable = {"mimo-v2-omni", "mimo-v2.5-pro", "minimax-m3"}
+    models = [{
+        "id": m.get("id"),
+        "owned_by": m.get("owned_by"),
+        "created": m.get("created"),
+        "multimodal": m.get("id") in vision_capable,
+    } for m in raw if m.get("id")]
+    _OPENCODE_MODEL_CACHE[cache_key] = {"models": models, "fetched_at": now}
+    return {"provider": "opencode_zen", "models": models,
+            "cached": False, "fetched_at": now.isoformat()}
 
 @api.get("/users")
 async def list_users(user: dict = Depends(require_roles("admin", "manager"))):

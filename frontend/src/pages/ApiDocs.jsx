@@ -37,6 +37,7 @@ const GROUPS = [
       ["GET", "/api/tenants/me/ocr-settings", "Get OCR + Co-Pilot config"],
       ["PUT", "/api/tenants/me/ocr-settings", "Update OCR + Co-Pilot (admin)"],
       ["POST", "/api/tenants/me/ocr-settings/test", "Ping olmOCR endpoint (admin)"],
+      ["GET", "/api/tenants/me/copilot/models", "List Co-Pilot models (e.g. OpenCode Zen catalogue)"],
       ["GET", "/api/users", "List users (admin/manager)"],
       ["POST", "/api/users", "Create user (admin)"],
       ["DELETE", "/api/users/{id}", "Delete user (admin)"],

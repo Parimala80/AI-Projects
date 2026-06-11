@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { PageHeader } from "../components/Layout";
-import { CheckCircle, XCircle, Lightning, FloppyDisk, PlugsConnected, Robot } from "@phosphor-icons/react";
+import { CheckCircle, XCircle, Lightning, FloppyDisk, PlugsConnected, Robot, ArrowsClockwise, ListBullets } from "@phosphor-icons/react";
 import { toast } from "sonner";
 
 const ENGINES = [
@@ -228,6 +228,7 @@ export default function Settings() {
                   <option value="azure_openai">Azure OpenAI Service</option>
                   <option value="m365_copilot">Microsoft 365 Copilot</option>
                   <option value="gemma">Gemma (self-hosted)</option>
+                  <option value="opencode_zen">OpenCode Zen (gateway)</option>
                 </select>
               </div>
 
@@ -397,6 +398,10 @@ export default function Settings() {
                   </div>
                 </div>
               )}
+
+              {s.copilot_provider === "opencode_zen" && (
+                <OpenCodeBlock s={s} upd={upd} />
+              )}
             </div>
           </section>
         </div>
@@ -428,6 +433,119 @@ vllm serve allenai/olmOCR-2-7B-1025-FP8 \\
             </div>
           </div>
         </aside>
+      </div>
+    </div>
+  );
+}
+
+function OpenCodeBlock({ s, upd }) {
+  const [models, setModels] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [meta, setMeta] = useState(null); // { cached, fetched_at }
+
+  const fetchModels = async (refresh = false) => {
+    setLoading(true);
+    try {
+      const { data } = await api.get(`/tenants/me/copilot/models?provider=opencode_zen${refresh ? "&refresh=true" : ""}`);
+      setModels(data.models || []);
+      setMeta({ cached: data.cached, fetched_at: data.fetched_at });
+      toast.success(refresh ? "Catalogue refreshed" : `Loaded ${data.models.length} models`);
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Failed to fetch models");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="border-l-2 border-[color:var(--accent-blue)] pl-4 space-y-3" data-testid="copilot-opencode-config">
+      <div className="label-tag mb-1">OPENCODE ZEN · GATEWAY</div>
+      <div>
+        <label className="label-tag block mb-1.5">BASE URL</label>
+        <input
+          className="input-flat"
+          value={s.opencode_base_url || ""}
+          onChange={(e) => upd("opencode_base_url", e.target.value)}
+          placeholder="https://opencode.ai/zen/go/v1"
+          data-testid="opencode-baseurl-input"
+        />
+      </div>
+      <div>
+        <label className="label-tag block mb-1.5">API KEY</label>
+        <input
+          type="password"
+          className="input-flat"
+          value={s.opencode_api_key || ""}
+          onChange={(e) => upd("opencode_api_key", e.target.value)}
+          placeholder="OpenCode Zen API key"
+          data-testid="opencode-apikey-input"
+        />
+      </div>
+      <div className="grid grid-cols-[1fr_auto] gap-3 items-end">
+        <div>
+          <label className="label-tag block mb-1.5">MODEL</label>
+          <select
+            className="input-flat"
+            value={s.opencode_model || ""}
+            onChange={(e) => upd("opencode_model", e.target.value)}
+            data-testid="opencode-model-select"
+          >
+            {models.length === 0 && (
+              <option value={s.opencode_model || ""}>{s.opencode_model || "— fetch catalogue first —"}</option>
+            )}
+            {models.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.id}{m.multimodal ? "  · multimodal" : ""}
+              </option>
+            ))}
+          </select>
+        </div>
+        <button
+          type="button"
+          onClick={() => fetchModels(true)}
+          disabled={loading}
+          className="btn-secondary inline-flex items-center gap-2 whitespace-nowrap"
+          data-testid="opencode-fetch-models-btn"
+        >
+          <ArrowsClockwise size={13} weight="bold" className={loading ? "animate-spin" : ""} />
+          {loading ? "Loading…" : "Fetch models"}
+        </button>
+      </div>
+      <div>
+        <label className="label-tag block mb-1.5">TIMEOUT (s)</label>
+        <input
+          type="number"
+          className="input-flat"
+          value={s.opencode_timeout || 60}
+          onChange={(e) => upd("opencode_timeout", parseInt(e.target.value) || 60)}
+          data-testid="opencode-timeout-input"
+        />
+      </div>
+      {models.length > 0 && (
+        <div className="swiss-card p-3" data-testid="opencode-catalogue">
+          <div className="flex items-center justify-between mb-2">
+            <div className="label-tag flex items-center gap-2">
+              <ListBullets size={11} weight="bold" />
+              CATALOGUE · {models.length} MODELS
+            </div>
+            {meta && (
+              <span className="text-[10px] font-mono text-[color:var(--text-secondary)]">
+                {meta.cached ? "cached" : "live"} · {(meta.fetched_at || "").slice(11, 19)}
+              </span>
+            )}
+          </div>
+          <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] font-mono max-h-40 overflow-y-auto scrollbar-thin">
+            {models.map((m) => (
+              <div key={m.id} className="flex items-center gap-1.5">
+                <span className={`dot ${m.multimodal ? "dot-green" : "dot-grey"}`} />
+                <span className={m.id === s.opencode_model ? "font-bold" : ""}>{m.id}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      <div className="text-xs text-[color:var(--text-secondary)] leading-relaxed">
+        OpenCode Zen is an OpenAI-compatible gateway. Get your key at <code className="font-mono">opencode.ai/zen</code>. Models marked <span className="dot dot-green inline-block" /> multimodal can see the document image; text-only models will still answer using the extracted JSON as context.
       </div>
     </div>
   );
