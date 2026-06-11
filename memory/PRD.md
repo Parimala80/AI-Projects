@@ -31,6 +31,21 @@ Build an enterprise-grade AI-powered Document Intelligence Platform that digitiz
 - REST APIs with OpenAPI/Swagger (`/docs`)
 - Dashboard analytics
 
+## Implementation Status — 2026-06-11 (Phase 4 — OpenCode Zen integration)
+✅ **OpenCode Zen** added as 7th Co-Pilot provider (OpenAI-compatible AI gateway)
+✅ **Live model discovery** via new endpoint `GET /api/tenants/me/copilot/models?provider=opencode_zen` (5-min server-side cache, `refresh=true` forces fresh fetch)
+✅ **Tenant settings** extended: `opencode_base_url` (default `https://opencode.ai/zen/go/v1`), `opencode_api_key` (masked), `opencode_model` (default `deepseek-v4-pro`), `opencode_timeout`
+✅ **Vision-aware handler**: whitelist `{mimo-v2-omni, mimo-v2.5-pro, minimax-m3}` receives image attachments; other models receive extracted-JSON context only
+✅ **Settings UI**: 7-option provider dropdown, dedicated OpenCode block with "Fetch models" button → catalogue panel (green dot = multimodal, grey = text-only)
+✅ **Graceful failure**: fake/missing API key returns string reply (`OpenCode Zen error 401: Invalid API key.`), never 5xx
+✅ **Test coverage**: 78/78 backend tests passing (16 new + 62 regression)
+
+## Implementation Status — 2026-05-13 (Phase 3 — Microsoft Co-Pilot + Gemma)
+✅ **Co-Pilot extended to 6 providers**: gemini / openai / anthropic (Emergent Universal Key) + azure_openai (per-tenant Azure deployment) + m365_copilot (MS Graph beta OAuth client-credentials) + gemma (self-hosted vLLM/Ollama)
+✅ **4 secret fields masked**: olmocr_api_key, azure_api_key, m365_client_secret, gemma_api_key — all `***LAST4` on read, ignored on PUT if masked
+✅ **Partial PUT correctness fix**: switched to `model_dump(exclude_unset=True)` so partial updates preserve unsent fields
+✅ **M365 token caching**: client-credentials flow with MongoDB `token_cache` collection
+
 ## Implementation Status — 2026-05-12 (Phase 2 — OCR Engine + Co-Pilot)
 ✅ **Tenant-level OCR engine selection**: `gemini` | `olmocr` | `auto` (with confidence-based fallback)
 ✅ **Self-hosted olmOCR integration**: tenant configures `olmocr_endpoint`, `olmocr_api_key`, `olmocr_model`, `olmocr_timeout`, `auto_fallback_threshold`
