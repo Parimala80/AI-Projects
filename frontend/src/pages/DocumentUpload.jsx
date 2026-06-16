@@ -13,10 +13,13 @@ export default function DocumentUpload() {
   const [engineOverride, setEngineOverride] = useState("");
   const [asSingleDoc, setAsSingleDoc] = useState(false);
   const [usingCamera, setUsingCamera] = useState(false);
+  const [cameraPages, setCameraPages] = useState([]); // [{ url, file }]
   const inputRef = useRef(null);
   const camRef = useRef(null);
   const videoRef = useRef(null);
   const navigate = useNavigate();
+
+  const MAX_CAMERA_PAGES = 3;
 
   const onPick = (e) => {
     const arr = Array.from(e.target.files || []);
@@ -80,22 +83,57 @@ export default function DocumentUpload() {
   };
 
   const captureFrame = () => {
+    if (cameraPages.length >= MAX_CAMERA_PAGES) {
+      toast.error(`Max ${MAX_CAMERA_PAGES} pages per session`);
+      return;
+    }
     const v = videoRef.current;
     const canvas = document.createElement("canvas");
     canvas.width = v.videoWidth;
     canvas.height = v.videoHeight;
     canvas.getContext("2d").drawImage(v, 0, 0);
     canvas.toBlob((blob) => {
-      const f = new File([blob], `capture-${Date.now()}.jpg`, { type: "image/jpeg" });
-      setFiles((prev) => [...prev, f]);
-      toast.success("Photo captured");
+      const ts = Date.now();
+      const file = new File([blob], `page-${cameraPages.length + 1}-${ts}.jpg`, { type: "image/jpeg" });
+      const url = URL.createObjectURL(blob);
+      setCameraPages((prev) => [...prev, { url, file }]);
+      toast.success(`Page ${cameraPages.length + 1} captured`);
     }, "image/jpeg", 0.92);
+  };
+
+  const removeCameraPage = (i) => {
+    setCameraPages((prev) => {
+      const next = prev.filter((_, idx) => idx !== i);
+      URL.revokeObjectURL(prev[i]?.url);
+      return next;
+    });
+  };
+
+  const retakeCameraPage = (i) => {
+    removeCameraPage(i);
+    toast.message("Re-take the page now");
+  };
+
+  const finishCameraSession = () => {
+    if (cameraPages.length === 0) {
+      stopCamera();
+      return;
+    }
+    const newFiles = cameraPages.map((p) => p.file);
+    setFiles((prev) => [...prev, ...newFiles]);
+    if (newFiles.length > 1) setAsSingleDoc(true);
+    cameraPages.forEach((p) => URL.revokeObjectURL(p.url));
+    setCameraPages([]);
+    stopCamera();
+    toast.success(`Staged ${newFiles.length} page${newFiles.length > 1 ? "s" : ""}`);
   };
 
   const stopCamera = () => {
     const v = videoRef.current;
     const stream = v?.srcObject;
     stream?.getTracks?.().forEach((t) => t.stop());
+    cameraPages.forEach((p) => URL.revokeObjectURL(p.url));
+    setCameraPages([]);
     setUsingCamera(false);
   };
 
@@ -154,11 +192,72 @@ export default function DocumentUpload() {
 
           {usingCamera && (
             <div className="swiss-card mt-4 p-4" data-testid="camera-panel">
-              <div className="label-tag mb-2 flex items-center gap-2"><span className="dot dot-red animate-pulse" /> LIVE</div>
+              <div className="flex items-center justify-between mb-2">
+                <div className="label-tag flex items-center gap-2">
+                  <span className="dot dot-red animate-pulse" /> LIVE
+                </div>
+                <div className="label-tag">
+                  {cameraPages.length} / {MAX_CAMERA_PAGES} PAGES
+                </div>
+              </div>
               <video ref={videoRef} className="w-full max-h-[420px] bg-black object-contain" />
-              <div className="flex items-center justify-end gap-2 mt-3">
-                <button onClick={captureFrame} className="btn-primary" data-testid="capture-button">Capture</button>
-                <button onClick={stopCamera} className="btn-secondary">Close</button>
+
+              {cameraPages.length > 0 && (
+                <div className="mt-3 flex gap-2 overflow-x-auto scrollbar-thin pb-1" data-testid="camera-page-strip">
+                  {cameraPages.map((p, i) => (
+                    <div key={i} className="relative shrink-0 group" data-testid={`camera-page-${i + 1}`}>
+                      <img
+                        src={p.url}
+                        alt={`Page ${i + 1}`}
+                        className="w-16 h-20 object-cover border border-[color:var(--border-line-strong)]"
+                      />
+                      <div className="absolute top-0 left-0 bg-[color:var(--brand-primary)] text-white text-[10px] px-1 font-mono">
+                        {i + 1}
+                      </div>
+                      <div className="absolute inset-0 flex items-center justify-center gap-1 bg-black/0 group-hover:bg-black/60 transition-colors">
+                        <button
+                          onClick={() => retakeCameraPage(i)}
+                          className="opacity-0 group-hover:opacity-100 bg-white text-black text-[10px] px-1 py-0.5 font-mono"
+                          data-testid={`camera-retake-${i + 1}`}
+                          title="Re-take"
+                        >RE</button>
+                        <button
+                          onClick={() => removeCameraPage(i)}
+                          className="opacity-0 group-hover:opacity-100 bg-[color:var(--accent-red)] text-white text-[10px] px-1 py-0.5 font-mono"
+                          data-testid={`camera-remove-${i + 1}`}
+                          title="Remove"
+                        >×</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="flex items-center justify-between gap-2 mt-3">
+                <div className="text-xs text-[color:var(--text-secondary)]">
+                  {cameraPages.length === 0
+                    ? "Capture page 1, then add more pages or finish."
+                    : `${cameraPages.length} page${cameraPages.length > 1 ? "s" : ""} captured. Tap Capture to add another, or Done to stage.`}
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    onClick={captureFrame}
+                    disabled={cameraPages.length >= MAX_CAMERA_PAGES}
+                    className="btn-primary"
+                    data-testid="capture-button"
+                  >
+                    {cameraPages.length === 0 ? "Capture" : "+ Add page"}
+                  </button>
+                  <button
+                    onClick={finishCameraSession}
+                    disabled={cameraPages.length === 0}
+                    className="btn-secondary"
+                    data-testid="camera-done-button"
+                  >
+                    Done · {cameraPages.length || ""}
+                  </button>
+                  <button onClick={stopCamera} className="btn-secondary" data-testid="camera-close-button">Cancel</button>
+                </div>
               </div>
             </div>
           )}
