@@ -129,7 +129,12 @@ export default function Documents() {
                 className="grid grid-cols-12 px-4 py-3 border-b border-[color:var(--border-line)] last:border-b-0 hover:bg-[color:var(--bg-surface)] items-center"
                 data-testid={`doc-row-${d.id}`}
               >
-                <div className="col-span-3 truncate text-sm font-mono">{d.filename}</div>
+                <div className="col-span-3 truncate text-sm font-mono">
+                  {d.filename}
+                  {d.page_count > 1 && (
+                    <span className="ml-2 status-pill" data-testid={`pages-badge-${d.id}`}>{d.page_count} PAGES</span>
+                  )}
+                </div>
                 <div className="col-span-2 text-xs">
                   <div className="label-tag">{d.doc_type}</div>
                   {d.extraction_engine && (

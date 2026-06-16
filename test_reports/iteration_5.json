@@ -1,0 +1,57 @@
+{
+  "summary": "Iteration 5 (Phase 5 part 1) testing — image compression + ownership scoping + multi-page document pipeline. Backend: 98/98 pytest pass in 78s (20 new iter5 + 78 prior iter1-4 regression). Compression: large PNG (3000x4000) -> JPEG with long edge<=2048, smaller bytes when raw>1MB; small JPEG passes through unchanged; EXIF orientation auto-applied when image hits compression path. PDF: 3-page PDF -> page_count=3, each page image/jpeg; 5-page PDF capped at MAX_PAGES_PER_DOC=3; page > page_count returns 404. upload-bulk: as_single_document=true merges N files into ONE doc with page_count=N; default behaviour still creates N separate docs. Visibility scoping verified for all 5 roles: admin/finance/manager see entire tenant; operations/warehouse see only own uploads; cross-role GET/DELETE returns 404 (no info leak); ops cannot reach admin doc via Co-Pilot chat; ops export/all excludes admin docs; dashboard ops_total <= admin_total. Backward-compat _doc_pages helper synthesises pages[] from legacy file_b64 — verified via file endpoint. Frontend: Documents list shows '3 PAGES' badge (data-testid=pages-badge-{id}); DocumentUpload toggle 'as-single-doc-toggle' hidden with 0 or 1 file, appears at >=2 files (visible=True only after staging 2 files); DocumentViewer shows page-indicator 'PAGE X / 3', page-strip with page-thumb-1/2/3, page-prev-btn / page-next-btn — next-btn advances to page 2/3, thumb-3 click jumps to page 3/3 with correct rendered page text.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "_compress_image_bytes", "issue": "EXIF orientation is only normalised when the recompression path triggers (size>1MB OR mime=image/png OR long_edge>2048). A small JPEG (<1MB, <=2048px) with EXIF orientation set is stored AS-IS without applying ImageOps.exif_transpose. Mobile camera shots often carry orientation tags but may be under 1MB. Suggest: also set needs_recompress=True when EXIF tag 0x0112 is present and !=1."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard", "issues": ["Recharts width(-1)/height(-1) warning persists from iter1-4 (cosmetic, not blocking)."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration5.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/test_iteration2.py",
+    "/app/backend/tests/test_iteration3.py",
+    "/app/backend/tests/test_iteration4.py",
+    "/app/test_reports/pytest/iter5_results.xml",
+    "/app/test_reports/pytest/iter5_full_results.xml"
+  ],
+  "action_items": [
+    "(LOW) Apply ImageOps.exif_transpose for ALL uploads (not gated by size/mime) so small mobile JPEGs with EXIF orientation are normalised before storage.",
+    "(LOW) server.py is now 1741 lines — modular split recommended (auth/documents/ocr_engines/copilot/exports/visibility).",
+    "(LOW) Recharts width(-1)/height(-1) warning on Dashboard — persists since iter1.",
+    "Multi-page Gemini real-LLM extraction not exercised in this run (test would take 30-60s and incur cost). The plumbing (extract_with_engine_multipage + _merge_page_extractions + per-page source_page tagging) is in place; recommend a manual end-to-end smoke when EMERGENT_LLM_KEY budget allows."
+  ],
+  "critical_code_review_comments": [
+    "_compress_image_bytes: PNG always recompressed -> JPEG (verified by file endpoint mime change). EXIF rotation gated by recompress trigger — small JPEGs with orientation tag bypass exif_transpose (see minor issue above).",
+    "_rasterize_pdf: PyMuPDF at 200 DPI, capped at MAX_PAGES_PER_DOC=3 — verified by 5-page PDF test; each page goes through _compress_image_bytes too -> jpeg.",
+    "_build_pages_from_files & _save_document_multipage: correctly cap combined pages at MAX_PAGES_PER_DOC; total upload size check at 30MB enforced.",
+    "_doc_pages: synthesises legacy single-page docs from file_b64 — verified via file endpoint on freshly uploaded docs (newly-created docs also have legacy fields filled for backward compat).",
+    "_visibility_filter: admin/finance/manager -> tenant-wide; operations/warehouse -> own uploads. Applied on GET/PUT/DELETE/file/export/copilot endpoints — verified no cross-user leak (5 role tests + cross-tenant 404).",
+    "GET /documents/{id}/file?page=N: scope+pagination correct; out-of-range returns 404 with detailed message.",
+    "POST /documents/upload-bulk: as_single_document=true bypasses per-file loop and calls _save_document_multipage; default branch unchanged.",
+    "_save_document still also writes legacy file_b64 (first page) -> backward-compat for any consumer reading the doc directly.",
+    "MAX_UPLOAD_MB=30, IMAGE_MAX_DIM=2048, IMAGE_JPEG_QUALITY=85, COMPRESS_THRESHOLD_BYTES=1MB, MAX_PAGES_PER_DOC=3, PDF_RENDER_DPI=200 — all env-overridable, sensible defaults.",
+    "server.py is 1741 lines (was 1461 in iter4, +280 lines this iteration) — modular split overdue."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration5.py (new — 20 tests across 7 classes: 3 compression, 2 PDF multi-page, 2 upload-bulk, 2 file endpoint, 5 visibility, 2 dashboard scope, 2 export+copilot scope, 2 regression)",
+    "/app/backend/tests/backend_test.py (1 line fix: TestDocuments.test_get_document_file expected image/png mime — updated to accept image/png OR image/jpeg since iter5 compresses PNG -> JPEG)"
+  ],
+  "success_rate": {
+    "backend": "100% (98/98: 20 iter5 + 16 iter4 + 21 iter3 + 15 iter2 + 26 iter1) in 78s",
+    "frontend": "100% (pages-badge renders '3 PAGES' for multi-page doc; as-single-doc-toggle hidden at 0/1 files, visible at 2+; viewer page-indicator 'PAGE 1/3' -> 'PAGE 2/3' via next-btn -> 'PAGE 3/3' via thumb-3; all 3 page-thumb-N + page-prev-btn + page-next-btn + page-strip render correctly)"
+  },
+  "test_credentials": "admin@docintel.io / Admin@123 (auto-seeded). iter5 creates TEST_iter5_{role}_{hex} users for operations/finance/warehouse/manager — auto-deleted in fixture teardown.",
+  "seed_data_creation": "Each test creates+deletes its own docs. All TEST_iter5_* docs cleaned post-run. Created 4 module-scoped test users (ops/finance/warehouse/manager) deleted at end of module.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Five backend test files now totalling 98 tests pass in ~78s. Run all: `pytest /app/backend/tests/ -v`. Test layout: backend_test.py(26 iter1) + test_iteration2.py(15) + test_iteration3.py(21) + test_iteration4.py(16) + test_iteration5.py(20). Multi-page Gemini real-LLM extraction NOT exercised (cost/time). EXIF auto-rotate has a known gap for small JPEGs (<1MB and <=2048px) — see minor backend issue. Frontend multipage flows: pages-badge, as-single-doc-toggle, page-indicator/strip/thumb-N/prev/next — all wired with stable testids. PyMuPDF 1.27.2.3 + Pillow 12.2 available in the venv.",
+  "rca of the issue": "Only one finding: EXIF orientation is not applied when image bypasses the compression path. RCA: _compress_image_bytes (server.py:1083) computes `needs_recompress = len(content) > COMPRESS_THRESHOLD_BYTES or mime.lower() == 'image/png'`, and short-circuits with `return content, mime, w, h` when neither resize nor recompress is needed. The `im = ImageOps.exif_transpose(im)` call only runs when one of the conditions triggers. Fix: also flag `needs_recompress = True` when `im.getexif().get(0x0112, 1) != 1`, or unconditionally apply exif_transpose+re-save when EXIF orientation is non-trivial."
+}

@@ -220,8 +220,9 @@ class TestDocuments:
         r = admin_session.get(f"{API}/documents/{uploaded_doc['id']}/file", timeout=15)
         assert r.status_code == 200
         j = r.json()
-        assert j["data_url"].startswith("data:image/png;base64,")
-        assert j["mime_type"] == "image/png"
+        # iter5: PNGs are auto-compressed to JPEG on upload
+        assert j["data_url"].startswith("data:image/")
+        assert j["mime_type"] in ("image/png", "image/jpeg")
 
     def test_list_documents_filters(self, admin_session, uploaded_doc):
         r = admin_session.get(f"{API}/documents?limit=50", timeout=15)

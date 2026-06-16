@@ -11,6 +11,7 @@ export default function DocumentUpload() {
   const [uploaded, setUploaded] = useState([]);
   const [autoProcess, setAutoProcess] = useState(true);
   const [engineOverride, setEngineOverride] = useState("");
+  const [asSingleDoc, setAsSingleDoc] = useState(false);
   const [usingCamera, setUsingCamera] = useState(false);
   const inputRef = useRef(null);
   const camRef = useRef(null);
@@ -34,7 +35,7 @@ export default function DocumentUpload() {
     if (files.length === 0) return toast.error("No files selected");
     setUploading(true);
     try {
-      if (files.length === 1) {
+      if (files.length === 1 && !asSingleDoc) {
         const fd = new FormData();
         fd.append("file", files[0]);
         fd.append("auto_process", autoProcess);
@@ -47,9 +48,13 @@ export default function DocumentUpload() {
         files.forEach((f) => fd.append("files", f));
         fd.append("auto_process", autoProcess);
         if (engineOverride) fd.append("engine_override", engineOverride);
+        fd.append("as_single_document", asSingleDoc);
         const r = await api.post("/documents/upload-bulk", fd);
         setUploaded(r.data.documents);
-        toast.success(`Uploaded ${r.data.uploaded} documents. Processing...`);
+        const msg = asSingleDoc
+          ? `Uploaded ${files.length} pages as 1 document. Processing...`
+          : `Uploaded ${r.data.uploaded} documents. Processing...`;
+        toast.success(msg);
       }
       setFiles([]);
     } catch (e) {
@@ -167,6 +172,17 @@ export default function DocumentUpload() {
                     <input type="checkbox" checked={autoProcess} onChange={(e) => setAutoProcess(e.target.checked)} data-testid="auto-process-toggle" />
                     Auto-extract on upload
                   </label>
+                  {files.length > 1 && (
+                    <label className="flex items-center gap-2 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={asSingleDoc}
+                        onChange={(e) => setAsSingleDoc(e.target.checked)}
+                        data-testid="as-single-doc-toggle"
+                      />
+                      Combine as <strong>one multi-page document</strong>
+                    </label>
+                  )}
                   <label className="flex items-center gap-2 text-xs">
                     <span className="label-tag">ENGINE</span>
                     <select

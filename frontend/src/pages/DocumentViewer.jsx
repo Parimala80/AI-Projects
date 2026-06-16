@@ -42,6 +42,7 @@ export default function DocumentViewer() {
   const { user } = useAuth();
   const [doc, setDoc] = useState(null);
   const [file, setFile] = useState(null);
+  const [currentPage, setCurrentPage] = useState(1);
   const [data, setData] = useState({});
   const [items, setItems] = useState([]);
   const [docType, setDocType] = useState("unknown");
@@ -51,13 +52,23 @@ export default function DocumentViewer() {
   const load = async () => {
     const [d, f] = await Promise.all([
       api.get(`/documents/${id}`),
-      api.get(`/documents/${id}/file`),
+      api.get(`/documents/${id}/file?page=${currentPage}`),
     ]);
     setDoc(d.data);
     setFile(f.data);
     setData(d.data.extracted_data || {});
     setItems(d.data.extracted_data?.line_items || []);
     setDocType(d.data.doc_type || "unknown");
+  };
+
+  const loadPage = async (pageNum) => {
+    setCurrentPage(pageNum);
+    try {
+      const f = await api.get(`/documents/${id}/file?page=${pageNum}`);
+      setFile(f.data);
+    } catch (e) {
+      toast.error(`Failed to load page ${pageNum}`);
+    }
   };
 
   useEffect(() => { load().catch(() => toast.error("Failed to load document")); /* eslint-disable-next-line */ }, [id]);
@@ -177,15 +188,57 @@ export default function DocumentViewer() {
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-0 border-t border-[color:var(--border-line)]" style={{ minHeight: "calc(100vh - 200px)" }}>
         {/* Left pane: document */}
         <div className="lg:col-span-6 border-r border-[color:var(--border-line)] bg-[color:var(--bg-surface)] relative" data-testid="document-pane">
-          <div className="sticky top-0 z-10 px-4 py-2 bg-white border-b border-[color:var(--border-line)] flex items-center justify-between">
-            <div className="label-tag">SOURCE SCAN</div>
+          <div className="sticky top-0 z-10 px-4 py-2 bg-white border-b border-[color:var(--border-line)] flex items-center justify-between flex-wrap gap-2">
+            <div className="label-tag flex items-center gap-2">
+              SOURCE SCAN
+              {doc.page_count > 1 && (
+                <span className="status-pill" data-testid="page-indicator">
+                  PAGE {currentPage} / {doc.page_count}
+                </span>
+              )}
+            </div>
             <div className="flex items-center gap-1">
+              {doc.page_count > 1 && (
+                <>
+                  <button
+                    onClick={() => loadPage(Math.max(1, currentPage - 1))}
+                    disabled={currentPage <= 1}
+                    className="btn-secondary !py-1 !px-2 text-xs"
+                    data-testid="page-prev-btn"
+                  >◀</button>
+                  <button
+                    onClick={() => loadPage(Math.min(doc.page_count, currentPage + 1))}
+                    disabled={currentPage >= doc.page_count}
+                    className="btn-secondary !py-1 !px-2 text-xs"
+                    data-testid="page-next-btn"
+                  >▶</button>
+                  <span className="mx-2 border-r border-[color:var(--border-line)] h-5" />
+                </>
+              )}
               <button onClick={() => setZoom((z) => Math.max(0.4, z - 0.1))} className="btn-secondary !py-1 !px-2" data-testid="zoom-out-btn"><MagnifyingGlassMinus size={12} /></button>
               <span className="font-mono text-xs px-2">{(zoom * 100).toFixed(0)}%</span>
               <button onClick={() => setZoom((z) => Math.min(3, z + 0.1))} className="btn-secondary !py-1 !px-2" data-testid="zoom-in-btn"><MagnifyingGlassPlus size={12} /></button>
             </div>
           </div>
-          <div className="p-6 overflow-auto scrollbar-thin" style={{ maxHeight: "calc(100vh - 230px)" }}>
+          {doc.page_count > 1 && (
+            <div className="px-4 py-2 border-b border-[color:var(--border-line)] bg-white flex gap-2 overflow-x-auto scrollbar-thin" data-testid="page-strip">
+              {Array.from({length: doc.page_count}, (_, i) => i + 1).map((pn) => (
+                <button
+                  key={pn}
+                  onClick={() => loadPage(pn)}
+                  data-testid={`page-thumb-${pn}`}
+                  className={`shrink-0 w-12 h-16 border text-xs font-mono flex items-center justify-center ${
+                    pn === currentPage
+                      ? "border-[color:var(--brand-primary)] bg-[color:var(--brand-primary)] text-white"
+                      : "border-[color:var(--border-line-strong)] hover:bg-[color:var(--bg-surface)]"
+                  }`}
+                >
+                  {pn}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="p-6 overflow-auto scrollbar-thin" style={{ maxHeight: "calc(100vh - 280px)" }}>
             {file?.mime_type?.startsWith("image/") ? (
               <img
                 src={file.data_url}

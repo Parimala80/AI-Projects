@@ -16,6 +16,8 @@ from typing import List, Optional, Dict, Any
 import bcrypt
 import jwt
 import httpx
+import fitz  # PyMuPDF for PDF rasterization
+from PIL import Image, ImageOps
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, UploadFile, File, Form, Query
 from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
@@ -347,30 +349,107 @@ async def extract_with_olmocr(image_b64: str, mime_type: str, settings: Dict[str
 
 async def extract_with_engine(tenant_id: str, image_b64: str, mime_type: str,
                               engine_override: Optional[str] = None) -> Dict[str, Any]:
-    """Route extraction through tenant-configured engine with optional auto-fallback."""
+    """(Legacy single-page) Route extraction through tenant-configured engine."""
+    return await extract_with_engine_multipage(
+        tenant_id,
+        [{"file_b64": image_b64, "mime_type": mime_type, "page_number": 1}],
+        engine_override)
+
+
+def _merge_page_extractions(per_page: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge N per-page extraction JSONs into a single unified document JSON.
+    Headers come from page 1; line_items concat from all pages (tagged with source_page)."""
+    if not per_page:
+        return {"doc_type": "other", "confidence": 0.0}
+    primary = per_page[0]
+    out = dict(primary)
+    all_items = []
+    raw_texts = []
+    confidences = []
+    for i, p in enumerate(per_page, 1):
+        for it in (p.get("line_items") or []):
+            all_items.append({**it, "source_page": i})
+        if p.get("raw_text"):
+            raw_texts.append(f"--- Page {i} ---\n{p['raw_text']}")
+        try:
+            confidences.append(float(p.get("confidence") or 0))
+        except Exception:
+            pass
+    out["line_items"] = all_items
+    if raw_texts:
+        out["raw_text"] = "\n\n".join(raw_texts)
+    if confidences:
+        out["confidence"] = round(sum(confidences) / len(confidences), 3)
+    out["_pages_processed"] = len(per_page)
+    return out
+
+
+async def extract_with_engine_multipage(tenant_id: str, pages: List[Dict[str, Any]],
+                                        engine_override: Optional[str] = None) -> Dict[str, Any]:
+    """Multi-page extraction router.
+    Engines with native multi-image support (gemini) → joint call.
+    Others (olmocr) → per-page loop + merge."""
     tenant = await db.tenants.find_one({"id": tenant_id}, {"_id": 0}) or {}
     settings = tenant.get("ocr_settings") or {}
     engine = (engine_override or settings.get("default_engine") or "gemini").lower()
     threshold = float(settings.get("auto_fallback_threshold") or 0.5)
     attempts: List[Dict[str, Any]] = []
 
+    async def _gemini_joint() -> Dict[str, Any]:
+        if not EMERGENT_LLM_KEY:
+            return {"doc_type": "other", "confidence": 0.0, "raw_text": "",
+                    "error": "EMERGENT_LLM_KEY not configured", "_engine": "gemini"}
+        try:
+            chat = LlmChat(
+                api_key=EMERGENT_LLM_KEY,
+                session_id=f"docintel-{uuid.uuid4()}",
+                system_message="You are a precise document understanding AI. Always return valid JSON only."
+            ).with_model("gemini", "gemini-2.5-pro")
+            imgs = [ImageContent(image_base64=p["file_b64"]) for p in pages]
+            prompt = EXTRACTION_PROMPT + (
+                f"\n\nThis document has {len(pages)} pages provided in order. "
+                "Combine information across pages — header on page 1, line items may span pages."
+                if len(pages) > 1 else "")
+            response = await chat.send_message(UserMessage(text=prompt, file_contents=imgs))
+            data = _parse_extraction_text(response)
+            data["_engine"] = "gemini"
+            data["_pages_processed"] = len(pages)
+            return data
+        except Exception as e:
+            logger.exception("gemini joint extraction failed")
+            return {"doc_type": "other", "confidence": 0.0, "raw_text": "", "error": str(e), "_engine": "gemini"}
+
+    async def _olmocr_per_page() -> Dict[str, Any]:
+        results = []
+        any_error = None
+        for p in pages:
+            r = await extract_with_olmocr(p["file_b64"], p["mime_type"], settings)
+            if r.get("error"):
+                any_error = r.get("error")
+            results.append(r)
+        merged = _merge_page_extractions(results)
+        merged["_engine"] = "olmocr"
+        if any_error and all(r.get("error") for r in results):
+            merged["error"] = any_error
+        return merged
+
     if engine == "olmocr":
-        data = await extract_with_olmocr(image_b64, mime_type, settings)
+        data = await _olmocr_per_page()
         attempts.append({"engine": "olmocr", "ok": not data.get("error"),
                          "confidence": data.get("confidence", 0)})
         data["_attempts"] = attempts
         return data
 
     if engine == "gemini":
-        data = await extract_with_gemini(image_b64, mime_type)
+        data = await _gemini_joint()
         attempts.append({"engine": "gemini", "ok": not data.get("error"),
                          "confidence": data.get("confidence", 0)})
         data["_attempts"] = attempts
         return data
 
-    # auto: try olmocr first if configured, fall back to gemini on failure or low confidence
+    # auto
     if settings.get("olmocr_endpoint"):
-        primary = await extract_with_olmocr(image_b64, mime_type, settings)
+        primary = await _olmocr_per_page()
         ok = not primary.get("error") and float(primary.get("confidence") or 0) >= threshold
         attempts.append({"engine": "olmocr", "ok": ok,
                          "confidence": primary.get("confidence", 0),
@@ -378,11 +457,11 @@ async def extract_with_engine(tenant_id: str, image_b64: str, mime_type: str,
         if ok:
             primary["_attempts"] = attempts
             return primary
-    fallback = await extract_with_gemini(image_b64, mime_type)
+    fallback = await _gemini_joint()
     attempts.append({"engine": "gemini", "ok": not fallback.get("error"),
                      "confidence": fallback.get("confidence", 0)})
     fallback["_attempts"] = attempts
-    fallback["_engine"] = "gemini"  # final engine that produced the data
+    fallback["_engine"] = "gemini"
     return fallback
 
 
@@ -992,25 +1071,148 @@ async def delete_vendor(vid: str, user: dict = Depends(require_roles("admin", "o
     return {"ok": True}
 
 # ----------------------------- DOCUMENTS -----------------------------
+# ----------------------------- IMAGE & PDF HELPERS -----------------------------
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "30"))
+IMAGE_MAX_DIM = int(os.environ.get("IMAGE_MAX_DIM", "2048"))
+IMAGE_JPEG_QUALITY = int(os.environ.get("IMAGE_JPEG_QUALITY", "85"))
+COMPRESS_THRESHOLD_BYTES = int(os.environ.get("COMPRESS_THRESHOLD_BYTES", str(1024 * 1024)))
+MAX_PAGES_PER_DOC = int(os.environ.get("MAX_PAGES_PER_DOC", "3"))
+PDF_RENDER_DPI = int(os.environ.get("PDF_RENDER_DPI", "200"))
+
+
+def _compress_image_bytes(content: bytes, mime: str) -> tuple[bytes, str, int, int]:
+    """Auto-rotate via EXIF, resize to IMAGE_MAX_DIM long edge, JPEG q=85.
+    Returns (bytes, new_mime, width, height). No-op if already small enough."""
+    try:
+        with Image.open(BytesIO(content)) as im:
+            im = ImageOps.exif_transpose(im)
+            w, h = im.size
+            long_edge = max(w, h)
+            needs_resize = long_edge > IMAGE_MAX_DIM
+            needs_recompress = len(content) > COMPRESS_THRESHOLD_BYTES or mime.lower() == "image/png"
+            if not (needs_resize or needs_recompress):
+                return content, mime, w, h
+            if needs_resize:
+                scale = IMAGE_MAX_DIM / long_edge
+                im = im.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+            if im.mode in ("RGBA", "P", "LA"):
+                bg = Image.new("RGB", im.size, (255, 255, 255))
+                bg.paste(im, mask=im.split()[-1] if im.mode in ("RGBA", "LA") else None)
+                im = bg
+            elif im.mode != "RGB":
+                im = im.convert("RGB")
+            out = BytesIO()
+            im.save(out, format="JPEG", quality=IMAGE_JPEG_QUALITY, optimize=True)
+            return out.getvalue(), "image/jpeg", im.width, im.height
+    except Exception as e:
+        logger.warning("image compress failed (%s); using original", e)
+        return content, mime, 0, 0
+
+
+def _rasterize_pdf(content: bytes) -> list[dict]:
+    """Rasterize each PDF page to JPEG. Returns list of page dicts (capped at MAX_PAGES_PER_DOC)."""
+    pages = []
+    try:
+        doc = fitz.open(stream=content, filetype="pdf")
+        zoom = PDF_RENDER_DPI / 72.0
+        mat = fitz.Matrix(zoom, zoom)
+        for i, page in enumerate(doc):
+            if i >= MAX_PAGES_PER_DOC:
+                break
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            img_bytes = pix.tobytes("png")
+            compressed, mime, w, h = _compress_image_bytes(img_bytes, "image/png")
+            pages.append({
+                "page_number": i + 1,
+                "mime_type": mime,
+                "file_b64": base64.b64encode(compressed).decode("utf-8"),
+                "width": w, "height": h,
+                "size": len(compressed),
+            })
+        doc.close()
+    except Exception as e:
+        logger.exception("pdf rasterize failed")
+        raise HTTPException(400, f"Could not read PDF: {e}")
+    if not pages:
+        raise HTTPException(400, "PDF has no rasterizable pages")
+    return pages
+
+
+def _build_pages_from_files(files: list[UploadFile], contents: list[bytes]) -> list[dict]:
+    """Combine multiple file uploads (images and/or PDFs) into a single pages[] list."""
+    out: list[dict] = []
+    for upload, content in zip(files, contents):
+        mime = upload.content_type or "application/octet-stream"
+        if mime == "application/octet-stream":
+            ext = (upload.filename or "").lower().rsplit(".", 1)[-1]
+            mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                    "webp": "image/webp", "pdf": "application/pdf"}.get(ext, mime)
+        if mime == "application/pdf":
+            out.extend(_rasterize_pdf(content))
+        elif mime.startswith("image/"):
+            compressed, new_mime, w, h = _compress_image_bytes(content, mime)
+            out.append({
+                "page_number": len(out) + 1,
+                "mime_type": new_mime,
+                "file_b64": base64.b64encode(compressed).decode("utf-8"),
+                "width": w, "height": h,
+                "size": len(compressed),
+            })
+        else:
+            raise HTTPException(400, f"Unsupported file type: {mime}")
+        if len(out) >= MAX_PAGES_PER_DOC:
+            break
+    out = out[:MAX_PAGES_PER_DOC]
+    for idx, p in enumerate(out, 1):
+        p["page_number"] = idx
+    return out
+
+
+def _doc_pages(doc: dict) -> list[dict]:
+    """Return pages[] from a document, synthesising one from legacy file_b64 if needed."""
+    pages = doc.get("pages")
+    if pages:
+        return pages
+    if doc.get("file_b64"):
+        return [{
+            "page_number": 1,
+            "mime_type": doc.get("mime_type") or "image/jpeg",
+            "file_b64": doc["file_b64"],
+            "width": 0, "height": 0,
+            "size": doc.get("size", 0),
+        }]
+    return []
+
+
+# ----------------------------- VISIBILITY -----------------------------
+def _visibility_filter(user: dict) -> dict:
+    """Row-level scope on documents.
+    admin/finance/manager → entire tenant; operations/warehouse → only own uploads."""
+    base = {"tenant_id": user["tenant_id"]}
+    if user.get("role") in ("admin", "finance", "manager"):
+        return base
+    return {**base, "uploaded_by": user["id"]}
+
+
 async def _save_document(file: UploadFile, user: dict) -> dict:
     content = await file.read()
-    if len(content) > 15 * 1024 * 1024:
+    if len(content) > MAX_UPLOAD_MB * 1024 * 1024:
         raise HTTPException(413, f"File too large: {file.filename}")
-    b64 = base64.b64encode(content).decode("utf-8")
-    mime = file.content_type or "application/octet-stream"
-    if mime == "application/octet-stream":
-        ext = (file.filename or "").lower().split(".")[-1]
-        mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
-                "webp": "image/webp", "pdf": "application/pdf"}.get(ext, mime)
+    pages = _build_pages_from_files([file], [content])
+    first = pages[0]
     doc = {
         "id": str(uuid.uuid4()),
         "tenant_id": user["tenant_id"],
         "filename": file.filename,
-        "mime_type": mime,
-        "file_b64": b64,
-        "size": len(content),
+        # legacy single-page fields (first page) for backward compat
+        "mime_type": first["mime_type"],
+        "file_b64": first["file_b64"],
+        "size": sum(p.get("size", 0) for p in pages),
+        # new multi-page fields
+        "pages": pages,
+        "page_count": len(pages),
         "doc_type": "unknown",
-        "status": "pending",  # pending, processing, processed, approved, rejected, failed
+        "status": "pending",
         "extracted_data": {},
         "confidence": 0.0,
         "validation_errors": [],
@@ -1023,7 +1225,49 @@ async def _save_document(file: UploadFile, user: dict) -> dict:
     }
     await db.documents.insert_one(doc.copy())
     await log_audit(user["tenant_id"], user["id"], "upload_document", "document", doc["id"],
-                    {"filename": file.filename, "size": len(content)})
+                    {"filename": file.filename, "pages": len(pages), "size": doc["size"]})
+    return doc
+
+
+async def _save_document_multipage(files: list[UploadFile], user: dict, group_filename: str = None) -> dict:
+    """Save multiple uploaded files as a SINGLE multi-page document."""
+    contents = []
+    total_size = 0
+    for f in files:
+        c = await f.read()
+        total_size += len(c)
+        if total_size > MAX_UPLOAD_MB * 1024 * 1024:
+            raise HTTPException(413, "Combined files too large")
+        contents.append(c)
+    pages = _build_pages_from_files(files, contents)
+    first = pages[0]
+    fname = group_filename or (files[0].filename if files else "document")
+    if len(files) > 1 and not group_filename:
+        fname = f"{fname} (+{len(files)-1} more)"
+    doc = {
+        "id": str(uuid.uuid4()),
+        "tenant_id": user["tenant_id"],
+        "filename": fname,
+        "mime_type": first["mime_type"],
+        "file_b64": first["file_b64"],
+        "size": sum(p.get("size", 0) for p in pages),
+        "pages": pages,
+        "page_count": len(pages),
+        "doc_type": "unknown",
+        "status": "pending",
+        "extracted_data": {},
+        "confidence": 0.0,
+        "validation_errors": [],
+        "uploaded_by": user["id"],
+        "uploaded_by_name": user.get("name"),
+        "approved_by": None,
+        "notes": "",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.documents.insert_one(doc.copy())
+    await log_audit(user["tenant_id"], user["id"], "upload_document", "document", doc["id"],
+                    {"filename": fname, "pages": len(pages), "size": doc["size"], "multipage": True})
     return doc
 
 @api.post("/documents/upload")
@@ -1032,27 +1276,46 @@ async def upload_document(file: UploadFile = File(...),
                           engine_override: Optional[str] = Form(None),
                           user: dict = Depends(get_current_user)):
     doc = await _save_document(file, user)
-    if auto_process and doc["mime_type"].startswith("image/"):
+    if auto_process:
         asyncio.create_task(_process_document_async(doc["id"], user["tenant_id"], engine_override))
     doc.pop("file_b64", None)
+    for p in doc.get("pages") or []:
+        p.pop("file_b64", None)
     return doc
 
 @api.post("/documents/upload-bulk")
 async def upload_bulk(files: List[UploadFile] = File(...),
                       auto_process: bool = Form(True),
                       engine_override: Optional[str] = Form(None),
+                      as_single_document: bool = Form(False),
+                      group_filename: Optional[str] = Form(None),
                       user: dict = Depends(get_current_user)):
+    """If as_single_document=True, combine ALL files into one multi-page document.
+    Otherwise each file becomes its own document (default, existing behaviour)."""
+    if as_single_document:
+        try:
+            d = await _save_document_multipage(files, user, group_filename)
+            if auto_process:
+                asyncio.create_task(_process_document_async(d["id"], user["tenant_id"], engine_override))
+            d.pop("file_b64", None)
+            for p in d.get("pages") or []:
+                p.pop("file_b64", None)
+            return {"uploaded": 1, "documents": [d]}
+        except HTTPException as e:
+            return {"uploaded": 0, "documents": [{"error": e.detail}]}
     saved = []
     for f in files:
         try:
             d = await _save_document(f, user)
-            if auto_process and d["mime_type"].startswith("image/"):
+            if auto_process:
                 asyncio.create_task(_process_document_async(d["id"], user["tenant_id"], engine_override))
             d.pop("file_b64", None)
+            for p in d.get("pages") or []:
+                p.pop("file_b64", None)
             saved.append(d)
         except HTTPException as e:
             saved.append({"filename": f.filename, "error": e.detail})
-    return {"uploaded": len(saved), "documents": saved}
+    return {"uploaded": len([s for s in saved if s.get("id")]), "documents": saved}
 
 async def _process_document_async(doc_id: str, tenant_id: str, engine_override: Optional[str] = None):
     doc = await db.documents.find_one({"id": doc_id, "tenant_id": tenant_id})
@@ -1060,12 +1323,12 @@ async def _process_document_async(doc_id: str, tenant_id: str, engine_override: 
         return
     await db.documents.update_one({"id": doc_id}, {"$set": {"status": "processing"}})
     try:
-        if doc["mime_type"].startswith("image/"):
-            data = await extract_with_engine(tenant_id, doc["file_b64"], doc["mime_type"], engine_override)
-        else:
+        pages = _doc_pages(doc)
+        if not pages:
             data = {"doc_type": "other", "confidence": 0.0, "raw_text": "",
-                    "error": "Only image processing supported in this MVP",
-                    "_engine": "none", "_attempts": []}
+                    "error": "No processable pages", "_engine": "none", "_attempts": []}
+        else:
+            data = await extract_with_engine_multipage(tenant_id, pages, engine_override)
         confidence = float(data.get("confidence") or 0.0)
         doc_type = data.get("doc_type") or "other"
         errors = await run_validations(tenant_id, doc_id, data)
@@ -1090,13 +1353,13 @@ async def _process_document_async(doc_id: str, tenant_id: str, engine_override: 
 async def process_document(doc_id: str,
                            engine_override: Optional[str] = Query(None),
                            user: dict = Depends(get_current_user)):
-    doc = await db.documents.find_one({"id": doc_id, "tenant_id": user["tenant_id"]})
+    doc = await db.documents.find_one({**_visibility_filter(user), "id": doc_id})
     if not doc:
         raise HTTPException(404, "Not found")
     await _process_document_async(doc_id, user["tenant_id"], engine_override)
     await log_audit(user["tenant_id"], user["id"], "process_document", "document", doc_id,
                     {"engine": engine_override or "tenant_default"})
-    updated = await db.documents.find_one({"id": doc_id}, {"_id": 0, "file_b64": 0})
+    updated = await db.documents.find_one({"id": doc_id}, {"_id": 0, "file_b64": 0, "pages.file_b64": 0})
     return updated
 
 @api.get("/documents")
@@ -1106,7 +1369,7 @@ async def list_documents(user: dict = Depends(get_current_user),
                          status: Optional[str] = None,
                          limit: int = 50,
                          skip: int = 0):
-    query = {"tenant_id": user["tenant_id"]}
+    query = _visibility_filter(user)
     if doc_type and doc_type != "all":
         query["doc_type"] = doc_type
     if status and status != "all":
@@ -1120,29 +1383,39 @@ async def list_documents(user: dict = Depends(get_current_user),
             {"extracted_data.po_number": {"$regex": q, "$options": "i"}},
         ]
     total = await db.documents.count_documents(query)
-    cursor = db.documents.find(query, {"_id": 0, "file_b64": 0}).sort("created_at", -1).skip(skip).limit(limit)
+    cursor = db.documents.find(query, {"_id": 0, "file_b64": 0, "pages.file_b64": 0}).sort("created_at", -1).skip(skip).limit(limit)
     docs = await cursor.to_list(limit)
     return {"total": total, "documents": docs}
 
 @api.get("/documents/{doc_id}")
 async def get_document(doc_id: str, user: dict = Depends(get_current_user)):
-    doc = await db.documents.find_one({"id": doc_id, "tenant_id": user["tenant_id"]}, {"_id": 0, "file_b64": 0})
+    doc = await db.documents.find_one({**_visibility_filter(user), "id": doc_id},
+                                       {"_id": 0, "file_b64": 0, "pages.file_b64": 0})
     if not doc:
         raise HTTPException(404, "Not found")
     return doc
 
 @api.get("/documents/{doc_id}/file")
-async def get_document_file(doc_id: str, user: dict = Depends(get_current_user)):
-    doc = await db.documents.find_one({"id": doc_id, "tenant_id": user["tenant_id"]}, {"_id": 0})
+async def get_document_file(doc_id: str,
+                            page: int = Query(1, ge=1),
+                            user: dict = Depends(get_current_user)):
+    doc = await db.documents.find_one({**_visibility_filter(user), "id": doc_id}, {"_id": 0})
     if not doc:
         raise HTTPException(404, "Not found")
-    return {"filename": doc.get("filename"), "mime_type": doc.get("mime_type"),
-            "data_url": f"data:{doc.get('mime_type')};base64,{doc.get('file_b64')}"}
+    pages = _doc_pages(doc)
+    if not pages:
+        raise HTTPException(404, "Document has no pages")
+    if page > len(pages):
+        raise HTTPException(404, f"Page {page} not found (doc has {len(pages)} pages)")
+    p = pages[page - 1]
+    return {"filename": doc.get("filename"), "mime_type": p.get("mime_type"),
+            "page_number": p.get("page_number"), "page_count": len(pages),
+            "data_url": f"data:{p.get('mime_type')};base64,{p.get('file_b64')}"}
 
 @api.put("/documents/{doc_id}")
 async def update_document(doc_id: str, payload: DocumentUpdateIn,
                           user: dict = Depends(get_current_user)):
-    doc = await db.documents.find_one({"id": doc_id, "tenant_id": user["tenant_id"]})
+    doc = await db.documents.find_one({**_visibility_filter(user), "id": doc_id})
     if not doc:
         raise HTTPException(404, "Not found")
     update = {}
@@ -1158,7 +1431,7 @@ async def update_document(doc_id: str, payload: DocumentUpdateIn,
     update["updated_at"] = datetime.now(timezone.utc).isoformat()
     await db.documents.update_one({"id": doc_id}, {"$set": update})
     await log_audit(user["tenant_id"], user["id"], "update_document", "document", doc_id)
-    return await db.documents.find_one({"id": doc_id}, {"_id": 0, "file_b64": 0})
+    return await db.documents.find_one({"id": doc_id}, {"_id": 0, "file_b64": 0, "pages.file_b64": 0})
 
 @api.post("/documents/{doc_id}/approve")
 async def approve_document(doc_id: str, user: dict = Depends(require_roles("admin", "finance", "manager"))):
@@ -1170,7 +1443,7 @@ async def approve_document(doc_id: str, user: dict = Depends(require_roles("admi
     if res.matched_count == 0:
         raise HTTPException(404, "Not found")
     await log_audit(user["tenant_id"], user["id"], "approve_document", "document", doc_id)
-    return await db.documents.find_one({"id": doc_id}, {"_id": 0, "file_b64": 0})
+    return await db.documents.find_one({"id": doc_id}, {"_id": 0, "file_b64": 0, "pages.file_b64": 0})
 
 @api.post("/documents/{doc_id}/reject")
 async def reject_document(doc_id: str, payload: DocumentUpdateIn,
@@ -1184,11 +1457,17 @@ async def reject_document(doc_id: str, payload: DocumentUpdateIn,
     if res.matched_count == 0:
         raise HTTPException(404, "Not found")
     await log_audit(user["tenant_id"], user["id"], "reject_document", "document", doc_id)
-    return await db.documents.find_one({"id": doc_id}, {"_id": 0, "file_b64": 0})
+    return await db.documents.find_one({"id": doc_id}, {"_id": 0, "file_b64": 0, "pages.file_b64": 0})
 
 @api.delete("/documents/{doc_id}")
-async def delete_document(doc_id: str, user: dict = Depends(require_roles("admin", "operations"))):
-    res = await db.documents.delete_one({"id": doc_id, "tenant_id": user["tenant_id"]})
+async def delete_document(doc_id: str, user: dict = Depends(get_current_user)):
+    # admin can delete anything in their tenant; ops can delete only own; others forbidden
+    if user.get("role") not in ("admin", "operations"):
+        raise HTTPException(403, "Requires role: admin or operations")
+    q = {"id": doc_id, "tenant_id": user["tenant_id"]}
+    if user.get("role") == "operations":
+        q["uploaded_by"] = user["id"]
+    res = await db.documents.delete_one(q)
     if res.deleted_count == 0:
         raise HTTPException(404, "Not found")
     await log_audit(user["tenant_id"], user["id"], "delete_document", "document", doc_id)
@@ -1197,14 +1476,17 @@ async def delete_document(doc_id: str, user: dict = Depends(require_roles("admin
 # ----------------------------- COPILOT -----------------------------
 @api.post("/documents/{doc_id}/copilot/chat")
 async def copilot_chat(doc_id: str, payload: CopilotChatIn, user: dict = Depends(get_current_user)):
-    doc = await db.documents.find_one({"id": doc_id, "tenant_id": user["tenant_id"]})
+    doc = await db.documents.find_one({**_visibility_filter(user), "id": doc_id})
     if not doc:
         raise HTTPException(404, "Not found")
+    pages = _doc_pages(doc)
+    first_b64 = pages[0].get("file_b64", "") if pages else ""
+    first_mime = pages[0].get("mime_type", "") if pages else ""
     reply = await copilot_reply(
         tenant_id=user["tenant_id"],
         doc=doc,
-        file_b64=doc.get("file_b64", ""),
-        mime=doc.get("mime_type", ""),
+        file_b64=first_b64,
+        mime=first_mime,
         user_msg=payload.message,
         history=payload.history or [],
     )
@@ -1245,7 +1527,7 @@ def _flatten_doc(doc: dict) -> dict:
 
 @api.get("/documents/export/all")
 async def export_all(format: str = Query("excel"), user: dict = Depends(get_current_user)):
-    cursor = db.documents.find({"tenant_id": user["tenant_id"]}, {"_id": 0, "file_b64": 0})
+    cursor = db.documents.find(_visibility_filter(user), {"_id": 0, "file_b64": 0, "pages.file_b64": 0})
     docs = await cursor.to_list(5000)
     rows = [_flatten_doc(d) for d in docs]
     fmt = format.lower()
@@ -1310,7 +1592,7 @@ async def export_all(format: str = Query("excel"), user: dict = Depends(get_curr
 
 @api.get("/documents/{doc_id}/export")
 async def export_one(doc_id: str, format: str = Query("excel"), user: dict = Depends(get_current_user)):
-    d = await db.documents.find_one({"id": doc_id, "tenant_id": user["tenant_id"]}, {"_id": 0, "file_b64": 0})
+    d = await db.documents.find_one({**_visibility_filter(user), "id": doc_id}, {"_id": 0, "file_b64": 0, "pages.file_b64": 0})
     if not d:
         raise HTTPException(404, "Not found")
     rows = [_flatten_doc(d)]
@@ -1340,36 +1622,33 @@ async def export_one(doc_id: str, format: str = Query("excel"), user: dict = Dep
 # ----------------------------- DASHBOARD / AUDIT -----------------------------
 @api.get("/dashboard/stats")
 async def dashboard_stats(user: dict = Depends(get_current_user)):
-    tid = user["tenant_id"]
-    total = await db.documents.count_documents({"tenant_id": tid})
+    base = _visibility_filter(user)
+    total = await db.documents.count_documents(base)
     by_status = {}
     for s in ["pending", "processing", "processed", "approved", "rejected", "failed"]:
-        by_status[s] = await db.documents.count_documents({"tenant_id": tid, "status": s})
+        by_status[s] = await db.documents.count_documents({**base, "status": s})
     by_type = {}
     for t in ["invoice", "delivery_challan", "purchase_order", "grn", "packing_slip", "eway_bill", "transport_slip", "other", "unknown"]:
-        c = await db.documents.count_documents({"tenant_id": tid, "doc_type": t})
+        c = await db.documents.count_documents({**base, "doc_type": t})
         if c > 0:
             by_type[t] = c
     pipeline = [
-        {"$match": {"tenant_id": tid, "confidence": {"$gt": 0}}},
+        {"$match": {**base, "confidence": {"$gt": 0}}},
         {"$group": {"_id": None, "avg": {"$avg": "$confidence"}}}
     ]
     avg = 0.0
     async for r in db.documents.aggregate(pipeline):
         avg = r.get("avg", 0.0) or 0.0
-    # last 14 days trend
     today = datetime.now(timezone.utc).date()
     days = [(today - timedelta(days=i)).isoformat() for i in range(13, -1, -1)]
     trend = []
     for day in days:
         start = day + "T00:00:00"
         end = day + "T23:59:59"
-        c = await db.documents.count_documents({"tenant_id": tid,
-            "created_at": {"$gte": start, "$lte": end}})
+        c = await db.documents.count_documents({**base, "created_at": {"$gte": start, "$lte": end}})
         trend.append({"date": day, "count": c})
-    # vendors top 5
     vp = [
-        {"$match": {"tenant_id": tid, "extracted_data.vendor_name": {"$nin": [None, ""]}}},
+        {"$match": {**base, "extracted_data.vendor_name": {"$nin": [None, ""]}}},
         {"$group": {"_id": "$extracted_data.vendor_name", "count": {"$sum": 1}}},
         {"$sort": {"count": -1}},
         {"$limit": 5}
@@ -1377,7 +1656,7 @@ async def dashboard_stats(user: dict = Depends(get_current_user)):
     top_vendors = []
     async for r in db.documents.aggregate(vp):
         top_vendors.append({"vendor": r["_id"], "count": r["count"]})
-    pending_review = await db.documents.count_documents({"tenant_id": tid,
+    pending_review = await db.documents.count_documents({**base,
         "status": {"$in": ["processed", "pending"]}})
     failed = by_status.get("failed", 0)
     return {
@@ -1389,6 +1668,7 @@ async def dashboard_stats(user: dict = Depends(get_current_user)):
         "top_vendors": top_vendors,
         "pending_review": pending_review,
         "failed_validations": failed,
+        "scope": "all" if user.get("role") in ("admin", "finance", "manager") else "own",
     }
 
 @api.get("/audit-logs")
