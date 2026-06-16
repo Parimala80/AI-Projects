@@ -31,6 +31,22 @@ Build an enterprise-grade AI-powered Document Intelligence Platform that digitiz
 - REST APIs with OpenAPI/Swagger (`/docs`)
 - Dashboard analytics
 
+## Implementation Status — 2026-06-16 (Phase 5 part 1 — Compression + Ownership + Multi-page)
+✅ **Image compression** on upload: auto-resize to 2048 px long-edge, JPEG quality 85, EXIF auto-rotation, recompresses on > 1 MB / PNG / EXIF rotation. Env-tunable: `IMAGE_MAX_DIM`, `IMAGE_JPEG_QUALITY`, `COMPRESS_THRESHOLD_BYTES`. 3000×4000 PNG (45 KB) → JPEG 1536×2048 (19 KB), 58% smaller.
+✅ **PDF rasterization** via PyMuPDF at 200 DPI → JPEG pages, then compression pipeline. Multi-page PDFs supported up to `MAX_PAGES_PER_DOC` (default 3). Larger PDFs gracefully capped.
+✅ **Multi-page data model**: `documents.pages[]` with `{page_number, mime_type, file_b64, width, height, size}` + `page_count`. Backward-compat via `_doc_pages()` synthesising pages[] for legacy single-page docs.
+✅ **Multi-file as single document**: `POST /documents/upload-bulk` with `as_single_document=true` merges N files into ONE doc; default behaviour unchanged (N separate docs).
+✅ **Multi-page extraction router**: Gemini does joint extraction (all pages in one call); olmOCR does per-page + merge with `_merge_page_extractions()` (line items tagged with `source_page`).
+✅ **Per-page file fetch**: `GET /documents/{id}/file?page=N` returns the Nth page; out-of-range returns 404.
+✅ **Row-level visibility filter** (`_visibility_filter`): admin/finance/manager see entire tenant; operations/warehouse see only their own uploads. Applied to list/get/file/update/process/delete/export/copilot endpoints + dashboard stats.
+✅ **Dashboard scope flag**: `scope: "all" | "own"` in `/dashboard/stats` response so frontend can show "your KPIs" vs "tenant KPIs".
+✅ **Cross-user 404 protection**: ops trying to fetch admin's doc gets 404, no information leak.
+✅ **Upload size cap** raised to 30 MB (was 15 MB) since compression now downsizes before storage.
+✅ **Frontend Document Viewer**: page indicator (`PAGE X / N`), page strip (`page-thumb-N`), prev/next navigation buttons, per-page image fetch on click.
+✅ **Frontend Documents list**: `X PAGES` badge for multi-page docs.
+✅ **Frontend Upload**: "Combine as one multi-page document" toggle (appears with 2+ files).
+✅ **Testing**: 98/98 backend tests passing (20 new + 78 regression). Frontend Playwright verified all multi-page flows.
+
 ## Implementation Status — 2026-06-11 (Phase 4 — OpenCode Zen integration)
 ✅ **OpenCode Zen** added as 7th Co-Pilot provider (OpenAI-compatible AI gateway)
 ✅ **Live model discovery** via new endpoint `GET /api/tenants/me/copilot/models?provider=opencode_zen` (5-min server-side cache, `refresh=true` forces fresh fetch)

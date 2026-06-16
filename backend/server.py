@@ -1082,14 +1082,23 @@ PDF_RENDER_DPI = int(os.environ.get("PDF_RENDER_DPI", "200"))
 
 def _compress_image_bytes(content: bytes, mime: str) -> tuple[bytes, str, int, int]:
     """Auto-rotate via EXIF, resize to IMAGE_MAX_DIM long edge, JPEG q=85.
-    Returns (bytes, new_mime, width, height). No-op if already small enough."""
+    Returns (bytes, new_mime, width, height). No-op if already small enough AND no EXIF rotation needed."""
     try:
         with Image.open(BytesIO(content)) as im:
+            # detect EXIF orientation that would change pixel layout
+            exif_rotated = False
+            try:
+                ori = (im.getexif() or {}).get(0x0112, 1)
+                exif_rotated = ori not in (None, 1)
+            except Exception:
+                pass
             im = ImageOps.exif_transpose(im)
             w, h = im.size
             long_edge = max(w, h)
             needs_resize = long_edge > IMAGE_MAX_DIM
-            needs_recompress = len(content) > COMPRESS_THRESHOLD_BYTES or mime.lower() == "image/png"
+            needs_recompress = (len(content) > COMPRESS_THRESHOLD_BYTES
+                                or mime.lower() == "image/png"
+                                or exif_rotated)
             if not (needs_resize or needs_recompress):
                 return content, mime, w, h
             if needs_resize:
