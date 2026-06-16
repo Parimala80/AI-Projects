@@ -1,5 +1,7 @@
 import { NavLink, useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
 import { useAuth } from "../contexts/AuthContext";
+import { api } from "../lib/api";
 import {
   House, FilePlus, Files, Users, Buildings, ListChecks,
   ChartBar, SignOut, BookOpen, Storefront, Gear,
@@ -7,7 +9,7 @@ import {
 
 const NAV = [
   { to: "/dashboard", label: "Dashboard", icon: ChartBar, roles: null },
-  { to: "/documents", label: "Documents", icon: Files, roles: null },
+  { to: "/documents", label: "Documents", icon: Files, roles: null, badge: "queue" },
   { to: "/upload", label: "Upload", icon: FilePlus, roles: ["admin", "operations"] },
   { to: "/vendors", label: "Vendors", icon: Storefront, roles: null },
   { to: "/users", label: "Users", icon: Users, roles: ["admin", "manager"] },
@@ -20,6 +22,25 @@ export default function Layout({ children }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const visible = NAV.filter((n) => !n.roles || n.roles.includes(user?.role));
+  const [queueCount, setQueueCount] = useState(null);
+  const [scope, setScope] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    const fetchQueue = async () => {
+      try {
+        const { data } = await api.get("/dashboard/stats");
+        if (!alive) return;
+        setQueueCount(data.pending_review ?? 0);
+        setScope(data.scope);
+      } catch {
+        if (alive) setQueueCount(null);
+      }
+    };
+    fetchQueue();
+    const id = setInterval(fetchQueue, 30000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
 
   return (
     <div className="min-h-screen flex bg-[color:var(--bg-base)]">
@@ -42,6 +63,7 @@ export default function Layout({ children }) {
         <nav className="flex-1 overflow-y-auto scrollbar-thin py-3">
           {visible.map((item) => {
             const Icon = item.icon;
+            const showBadge = item.badge === "queue" && queueCount != null && queueCount > 0;
             return (
               <NavLink
                 key={item.to}
@@ -56,7 +78,16 @@ export default function Layout({ children }) {
                 }
               >
                 <Icon size={17} weight="bold" />
-                <span>{item.label}</span>
+                <span className="flex-1">{item.label}</span>
+                {showBadge && (
+                  <span
+                    className="bg-[color:var(--accent-yellow)] text-black text-[10px] font-mono font-bold px-1.5 py-0.5 leading-none"
+                    title={scope === "own" ? "Your queue" : "Tenant queue"}
+                    data-testid="queue-badge"
+                  >
+                    {queueCount > 99 ? "99+" : queueCount}
+                  </span>
+                )}
               </NavLink>
             );
           })}
